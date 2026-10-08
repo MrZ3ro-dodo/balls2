@@ -1,10 +1,14 @@
 (() => {
   const canvas = document.querySelector('#boardCanvas');
-  const context = canvas.getContext('2d');
+  let context = canvas.getContext('2d');
   const canvasWrap = document.querySelector('#canvasWrap');
-  const STORAGE_KEY = 'talus-board-v1';
+  const magnifierCanvas = document.querySelector('#magnifierCanvas');
+  const magnifierContext = magnifierCanvas.getContext('2d');
+  const STORAGE_KEY = 'stone-plate-state-v1';
+  const LEGACY_STORAGE_KEY = 'talus-board-v1';
+  const LEGACY_HEALTH_STORAGE_KEY = 'health-state';
   const GRID = 64;
-  const MAX_MAP_TILES = 5000;
+  const MAX_MAP_DIMENSION = 10000;
   const DEFAULT_OPACITY = 0.65;
   const DEFAULT_MAP = { shape: 'square', width: 50, height: 50 };
   const TILE_STYLES = {
@@ -14,14 +18,22 @@
     lava: { fill: '#a84e3c', stroke: '#e99561' },
     wall: { fill: '#9d9a8c', stroke: '#d0cdbd' }
   };
-  const defaultState = () => ({ tokens: [], tiles: [], shapes: [], opacity: DEFAULT_OPACITY, map: { ...DEFAULT_MAP }, initiative: { round: 1, activeTokenId: null, combatants: [] } });
+  const defaultHealthState = () => ({ currentHp: 80, maxHp: 100, color: '#22c55e', label: 'HP', textOutlineColor: '#111827', displayMode: 'values', imageDataUrl: '', damageEmoji: '💥', characters: [{ id: crypto.randomUUID(), name: 'Personagem 1', vitality: 70, vitalityMax: 100, lucidity: 55, lucidityMax: 100, linkedTokenId: null, imageDataUrl: '', emojiAuraEnabled: false, emojiAuraEmoji: '💥' }], bossName: 'Boss', bossMovement: 'none', bossAfterImageModes: ['bruta'], bossAfterImageColor: '#ff4d4d', turnOrder: [], activeTurnIndex: 0, lastDamage: null });
+  const defaultState = () => ({ tokens: [], tiles: [], shapes: [], opacity: DEFAULT_OPACITY, gridVisible: true, map: { ...DEFAULT_MAP }, initiative: { round: 1, activeTokenId: null, combatants: [] }, health: defaultHealthState() });
+  const stateChannel = 'BroadcastChannel' in window ? new BroadcastChannel('stone-plate-state-v1') : null;
+  const stateSubscribers = new Set();
+  const seenDiceRolls = new Set();
   let state = loadState();
   let tool = 'select';
   let tileType = 'stone';
   let zoom = 1;
   let panX = 0;
   let panY = 0;
-  let gridVisible = true;
+  let gridVisible = state.gridVisible !== false;
+  let magnifierMode = 0;
+  let magnifierZoom = 3;
+  let magnifierFixedZoom = 0.3;
+  let magnifierPointer = null;
   let selectedId = null;
   let activePointer = null;
   let currentShape = null;
@@ -32,8 +44,10 @@
   let projectilePreview = null;
   let activeProjectiles = [];
   let projectileImpacts = [];
+  let projectileMarks = [];
   let projectileFrame = null;
   const seenProjectiles = new Set();
+  const seenProjectileTurns = new Set();
   let pendingTokenMove = null;
   let locatedTokenId = null;
   let locateTimer = 0;
@@ -49,11 +63,19 @@
   let roomId = '';
   let connections = new Map();
   let toastTimer = 0;
+  let mapPathCacheKey = '';
+  let mapPathCache = null;
+  let mapOutlineCacheKey = '';
+  let mapOutlineCache = null;
+  let mapTileCountCacheKey = '';
+  let mapTileCountCache = 0;
 
   function loadState() {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (saved && Array.isArray(saved.tokens) && Array.isArray(saved.tiles) && Array.isArray(saved.shapes)) return alignStateToGrid(saved);
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || 'null');
+      const health = saved?.health || JSON.parse(localStorage.getItem(LEGACY_HEALTH_STORAGE_KEY) || 'null') || defaultHealthState();
+      if (saved && Array.isArray(saved.tokens) && Array.isArray(saved.tiles) && Array.isArray(saved.shapes)) return alignStateToGrid({ ...saved, health });
+      return alignStateToGrid({ ...defaultState(), health });
     } catch (error) {
       console.warn('Não foi possível carregar o mapa salvo.', error);
     }
@@ -61,21 +83,205 @@
   }
 
   function saveState() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      stateChannel?.postMessage({ type: 'state', state });
+    }
     catch (error) { showToast('Não foi possível salvar. O mapa pode estar muito grande.'); }
   }
 
-  function broadcastState() {
+  function notifyStateSubscribers() {
+    for (const subscriber of stateSubscribers) subscriber(state);
+  }
+
+  function syncHealthToTokens() {
+    const characters = state.health?.characters;
+    if (!Array.isArray(characters)) return;
+    for (const character of characters) {
+      const token = state.tokens.find(item => String(item.id) === String(character.linkedTokenId));
+      if (!token) continue;
+      token.name = character.name || token.name;
+      token.health = {
+        vitality: Number(character.vitality ?? character.hp ?? 0),
+        vitalityMax: Number(character.vitalityMax ?? 100),
+        lucidity: Number(character.lucidity ?? character.sanity ?? 0),
+        lucidityMax: Number(character.lucidityMax ?? 100)
+      };
+    }
+  }
+
+  function syncTokenNamesToHealth() {
+    const characters = state.health?.characters;
+    if (!Array.isArray(characters)) return;
+    for (const character of characters) {
+      const token = state.tokens.find(item => String(item.id) === String(character.linkedTokenId));
+      if (token && token.name) character.name = token.name;
+    }
+  }
+
+  function syncInitiativeFromHealth() {
+    const health = state.health;
+    const characters = Array.isArray(health.characters) ? health.characters : [];
+    for (const character of characters) {
+      const tokenId = character.linkedTokenId;
+      if (!tokenId || !state.tokens.some(token => String(token.id) === String(tokenId))) continue;
+      if (!state.initiative.combatants.some(combatant => String(combatant.tokenId) === String(tokenId))) {
+        state.initiative.combatants.push({ tokenId, initiative: null });
+      }
+    }
+    const entries = [...characters.map(character => ({ id: `character-${character.id}`, character })), { id: 'boss', character: null }];
+    const ordered = [];
+    const seen = new Set();
+    for (const item of Array.isArray(health.turnOrder) ? health.turnOrder : []) {
+      const entry = entries.find(candidate => candidate.id === item.id);
+      if (entry && !seen.has(entry.id)) { ordered.push(entry); seen.add(entry.id); }
+    }
+    for (const entry of entries) if (!seen.has(entry.id)) ordered.push(entry);
+    const active = ordered[Math.max(0, Number(health.activeTurnIndex) || 0)];
+    const activeTokenId = active?.character?.linkedTokenId;
+    if (activeTokenId && state.initiative.combatants.some(item => String(item.tokenId) === String(activeTokenId))) state.initiative.activeTokenId = activeTokenId;
+    else if (active?.id === 'boss') state.initiative.activeTokenId = null;
+    state.initiative.round = Math.max(1, Number(health.round) || state.initiative.round || 1);
+  }
+
+  function syncHealthTurnFromMap() {
+    const activeTokenId = state.initiative.activeTokenId;
+    const character = state.health.characters.find(item => String(item.linkedTokenId || '') === String(activeTokenId || ''));
+    if (character) {
+      const entries = [...state.health.characters.map(item => ({ id: `character-${item.id}` })), { id: 'boss' }];
+      const ordered = [];
+      const seen = new Set();
+      for (const item of Array.isArray(state.health.turnOrder) ? state.health.turnOrder : []) {
+        if (entries.some(entry => entry.id === item.id) && !seen.has(item.id)) { ordered.push(item.id); seen.add(item.id); }
+      }
+      for (const entry of entries) if (!seen.has(entry.id)) ordered.push(entry.id);
+      state.health.activeTurnIndex = ordered.indexOf(`character-${character.id}`);
+    }
+    state.health.round = state.initiative.round;
+  }
+
+  function broadcastState(origin = 'map') {
+    if (origin !== 'characters') syncTokenNamesToHealth();
+    if (origin !== 'characters') syncHealthTurnFromMap();
+    syncHealthToTokens();
     saveState();
     render();
+    notifyStateSubscribers();
     if (hostMode) broadcast({ type: 'state', state });
     else if (peer && connections.has('host')) connections.get('host').send({ type: 'state', state });
   }
+
+  function updateHealth(mutator) {
+    const previousTurn = `${state.health.round || 1}:${state.health.activeTurnIndex || 0}`;
+    mutator(state.health);
+    if (previousTurn !== `${state.health.round || 1}:${state.health.activeTurnIndex || 0}`) advanceShapeAlerts();
+    syncInitiativeFromHealth();
+    broadcastState('characters');
+  }
+
+  function nextCharacterTokenPosition() {
+    const { map } = mapWorldBounds();
+    const origin = { x: snapCellCenter(0), y: snapCellCenter(0) };
+    const occupied = new Set(state.tokens.map(token => `${token.x}:${token.y}`));
+    for (let radius = 0; radius <= Math.max(map.width, map.height); radius++) {
+      for (let row = -radius; row <= radius; row++) {
+        for (let column = -radius; column <= radius; column++) {
+          if (Math.max(Math.abs(column), Math.abs(row)) !== radius) continue;
+          const position = { x: origin.x + column * GRID, y: origin.y + row * GRID };
+          if (pointInsideMap(position) && !occupied.has(`${position.x}:${position.y}`)) return position;
+        }
+      }
+    }
+    return null;
+  }
+
+  function ensureCharacterTokens() {
+    const health = state.health;
+    if (health.characterTokensMigrated) return;
+    let complete = true;
+    for (const character of Array.isArray(health.characters) ? health.characters : []) {
+      if (state.tokens.some(token => String(token.id) === String(character.linkedTokenId))) continue;
+      const position = nextCharacterTokenPosition();
+      if (!position) { complete = false; break; }
+      const token = {
+        id: crypto.randomUUID(), ...position, radius: 22, name: character.name || 'Personagem',
+        color: '#d87054', opacity: state.opacity
+      };
+      character.linkedTokenId = token.id;
+      state.tokens.push(token);
+    }
+    health.characterTokensMigrated = complete;
+  }
+
+  function addCharacter(character) {
+    const position = nextCharacterTokenPosition();
+    if (!position) { showToast('Não há espaço livre no mapa para criar o token.'); return false; }
+    const token = {
+      id: crypto.randomUUID(), ...position, radius: 22, name: character.name || 'Personagem',
+      color: '#d87054', opacity: state.opacity
+    };
+    character.linkedTokenId = token.id;
+    state.health.characters.push(character);
+    state.tokens.push(token);
+    syncHealthToTokens();
+    syncInitiativeFromHealth();
+    broadcastState('characters');
+    return true;
+  }
+
+  function advanceHealthTurn() {
+    const characters = Array.isArray(state.health.characters) ? state.health.characters : [];
+    const entries = [...characters.map(character => ({ id: `character-${character.id}` })), { id: 'boss' }];
+    const ordered = [];
+    const seen = new Set();
+    for (const saved of Array.isArray(state.health.turnOrder) ? state.health.turnOrder : []) {
+      if (entries.some(entry => entry.id === saved.id) && !seen.has(saved.id)) { ordered.push(saved.id); seen.add(saved.id); }
+    }
+    for (const entry of entries) if (!seen.has(entry.id)) ordered.push(entry.id);
+    state.health.activeTurnIndex = ((Number(state.health.activeTurnIndex) || 0) + 1) % ordered.length;
+    state.health.round = Math.max(1, Number(state.health.round) || 1) + (state.health.activeTurnIndex === 0 ? 1 : 0);
+    advanceShapeAlerts();
+    syncInitiativeFromHealth();
+    advanceProjectiles();
+    broadcastState('characters');
+  }
+
+  window.StonePlate = {
+    getState: () => state,
+    updateHealth,
+    addCharacter,
+    advanceTurn: advanceHealthTurn,
+    broadcastDiceRoll: publishDiceRoll,
+    subscribe(callback) { stateSubscribers.add(callback); callback(state); return () => stateSubscribers.delete(callback); },
+    notify: notifyStateSubscribers
+  };
 
   function broadcast(message) {
     for (const connection of connections.values()) {
       if (connection.open) connection.send(message);
     }
+  }
+
+  function publishDiceRoll(roll) {
+    seenDiceRolls.add(roll.id);
+    stateChannel?.postMessage({ type: 'dice-roll', roll });
+    if (hostMode) broadcast({ type: 'dice-roll', roll });
+    else if (peer && connections.has('host')) connections.get('host').send({ type: 'dice-roll', roll });
+  }
+
+  function receiveDiceRoll(roll, source) {
+    const validSides = [2, 4, 6, 8, 10, 12, 20, 30, 60, 100];
+    if (!roll?.id || typeof roll.id !== 'string' || roll.id.length > 80 || seenDiceRolls.has(roll.id) ||
+      !validSides.includes(roll.sides) || !Number.isInteger(roll.quantity) || roll.quantity < 1 || roll.quantity > 999 ||
+      !Array.isArray(roll.values) || roll.values.length !== roll.quantity ||
+      !roll.values.every(value => Number.isInteger(value) && value >= 1 && value <= roll.sides)) return;
+    seenDiceRolls.add(roll.id);
+    if (seenDiceRolls.size > 200) seenDiceRolls.delete(seenDiceRolls.values().next().value);
+    if (source === 'peer') {
+      stateChannel?.postMessage({ type: 'dice-roll', roll });
+      if (hostMode) broadcast({ type: 'dice-roll', roll });
+    } else if (hostMode) broadcast({ type: 'dice-roll', roll });
+    else if (peer && connections.has('host')) connections.get('host').send({ type: 'dice-roll', roll });
   }
 
   function resizeCanvas() {
@@ -86,6 +292,9 @@
     canvas.style.width = `${bounds.width}px`;
     canvas.style.height = `${bounds.height}px`;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    magnifierCanvas.width = Math.max(1, Math.round(196 * ratio));
+    magnifierCanvas.height = Math.max(1, Math.round(196 * ratio));
+    magnifierContext.setTransform(ratio, 0, 0, ratio, 0, 0);
     render();
   }
 
@@ -108,6 +317,35 @@
     return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
   }
 
+  function updateMagnifier() {
+    const hud = document.querySelector('#magnifierHud');
+    const visible = magnifierMode !== 0 && magnifierPointer !== null;
+    hud.hidden = !visible;
+    if (!visible) return;
+    const size = 196;
+    const center = screenToWorld(magnifierPointer);
+    const mainContext = context;
+    const mainZoom = zoom;
+    const mainPanX = panX;
+    const mainPanY = panY;
+    try {
+      context = magnifierContext;
+      zoom = magnifierMode === 2 ? magnifierFixedZoom : mainZoom * magnifierZoom;
+      panX = -center.x * zoom;
+      panY = -center.y * zoom;
+      drawMapScene(size, size);
+    } finally {
+      context = mainContext;
+      zoom = mainZoom;
+      panX = mainPanX;
+      panY = mainPanY;
+    }
+    const readout = magnifierMode === 2
+      ? `LUPA FIXA ~${Math.round(size / (GRID * magnifierFixedZoom))} tiles`
+      : `LUPA ${magnifierZoom.toFixed(1)}x`;
+    document.querySelector('#magnifierReadout').textContent = readout;
+  }
+
   function mapWorldBounds(config = state.map) {
     const map = normalizeMapConfig(config);
     const left = -Math.floor(map.width / 2) * GRID;
@@ -117,39 +355,99 @@
 
   function mapPath(config = state.map) {
     const bounds = mapWorldBounds(config);
+    const cacheKey = `${bounds.map.shape}:${bounds.map.width}:${bounds.map.height}`;
+    if (cacheKey === mapPathCacheKey && mapPathCache) return mapPathCache;
     const path = new Path2D();
-    if (bounds.map.shape === 'circle') {
-      path.ellipse((bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2, bounds.width / 2, bounds.height / 2, 0, 0, Math.PI * 2);
-    } else if (bounds.map.shape === 'triangle') {
-      path.moveTo((bounds.left + bounds.right) / 2, bounds.top);
-      path.lineTo(bounds.right, bounds.bottom);
-      path.lineTo(bounds.left, bounds.bottom);
-      path.closePath();
+    if (bounds.map.shape === 'circle' || bounds.map.shape === 'triangle') {
+      for (let row = 0; row < bounds.map.height; row++) {
+        const range = mapCellRange(bounds.map, row);
+        if (range.start < range.end) path.rect(bounds.left + range.start * GRID, bounds.top + row * GRID, (range.end - range.start) * GRID, GRID);
+      }
     } else path.rect(bounds.left, bounds.top, bounds.width, bounds.height);
-    return path;
+    mapPathCacheKey = cacheKey;
+    mapPathCache = path;
+    return mapPathCache;
+  }
+
+  function mapCellInside(map, column, row) {
+    if (column < 0 || row < 0 || column >= map.width || row >= map.height) return false;
+    const x = (column + 0.5) / map.width;
+    const y = (row + 0.5) / map.height;
+    if (map.shape === 'circle') return ((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2 <= 1;
+    if (map.shape === 'triangle') return Math.abs(x - 0.5) <= y / 2;
+    return true;
+  }
+
+  function mapCellRange(map, row) {
+    const y = (row + 0.5) / map.height;
+    const halfWidth = map.shape === 'circle' ? Math.sqrt(Math.max(0, 1 - (2 * y - 1) ** 2)) / 2 : y / 2;
+    let start = Math.max(0, Math.ceil((0.5 - halfWidth) * map.width - 0.5) - 1);
+    let end = Math.min(map.width, Math.floor((0.5 + halfWidth) * map.width - 0.5) + 2);
+    while (start < end && !mapCellInside(map, start, row)) start++;
+    while (end > start && !mapCellInside(map, end - 1, row)) end--;
+    return { start, end };
+  }
+
+  function mapOutlinePath(bounds) {
+    const cacheKey = `${bounds.map.shape}:${bounds.map.width}:${bounds.map.height}`;
+    if (cacheKey === mapOutlineCacheKey && mapOutlineCache) return mapOutlineCache;
+    const path = new Path2D();
+    const addExposedHorizontalEdges = (range, neighbor, y) => {
+      if (range.start >= range.end) return;
+      if (neighbor.start >= neighbor.end) {
+        path.moveTo(bounds.left + range.start * GRID, y);
+        path.lineTo(bounds.left + range.end * GRID, y);
+        return;
+      }
+      if (range.start < neighbor.start) {
+        path.moveTo(bounds.left + range.start * GRID, y);
+        path.lineTo(bounds.left + Math.min(range.end, neighbor.start) * GRID, y);
+      }
+      if (range.end > neighbor.end) {
+        path.moveTo(bounds.left + Math.max(range.start, neighbor.end) * GRID, y);
+        path.lineTo(bounds.left + range.end * GRID, y);
+      }
+    };
+    for (let row = 0; row < bounds.map.height; row++) {
+      const range = mapCellRange(bounds.map, row);
+      if (range.start >= range.end) continue;
+      const top = bounds.top + row * GRID;
+      const bottom = top + GRID;
+      const empty = { start: 0, end: 0 };
+      const previous = row > 0 ? mapCellRange(bounds.map, row - 1) : empty;
+      const next = row + 1 < bounds.map.height ? mapCellRange(bounds.map, row + 1) : empty;
+      addExposedHorizontalEdges(range, previous, top);
+      addExposedHorizontalEdges(range, next, bottom);
+      path.moveTo(bounds.left + range.start * GRID, top);
+      path.lineTo(bounds.left + range.start * GRID, bottom);
+      path.moveTo(bounds.left + range.end * GRID, top);
+      path.lineTo(bounds.left + range.end * GRID, bottom);
+    }
+    mapOutlineCacheKey = cacheKey;
+    mapOutlineCache = path;
+    return mapOutlineCache;
   }
 
   function pointInsideMap(point, config = state.map) {
     const bounds = mapWorldBounds(config);
     const column = Math.floor((point.x - bounds.left) / GRID);
     const row = Math.floor((point.y - bounds.top) / GRID);
-    if (column < 0 || row < 0 || column >= bounds.map.width || row >= bounds.map.height) return false;
-    const x = (column + 0.5) / bounds.map.width;
-    const y = (row + 0.5) / bounds.map.height;
-    if (bounds.map.shape === 'circle') return ((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2 <= 1;
-    if (bounds.map.shape === 'triangle') return Math.abs(x - 0.5) <= y / 2;
-    return true;
+    return mapCellInside(bounds.map, column, row);
   }
 
   function countMapTiles(config = state.map) {
     const map = normalizeMapConfig(config);
     if (map.shape === 'rectangle' || map.shape === 'square') return map.width * map.height;
+    const cacheKey = `${map.shape}:${map.width}:${map.height}`;
+    if (cacheKey === mapTileCountCacheKey) return mapTileCountCache;
     let count = 0;
-    for (let row = 0; row < map.height; row++) for (let column = 0; column < map.width; column++) {
-      const x = (column + 0.5) / map.width, y = (row + 0.5) / map.height;
-      if (map.shape === 'circle' ? ((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2 <= 1 : Math.abs(x - 0.5) <= y / 2) count++;
+    for (let row = 0; row < map.height; row++) {
+      const range = mapCellRange(map, row);
+      count += range.end - range.start;
     }
-    return count;
+    mapTileCountCacheKey = cacheKey;
+    mapTileCountCache = count;
+    return mapTileCountCache;
   }
 
   function aimPointFor(point) {
@@ -198,10 +496,16 @@
   }
 
   function projectilePoint(projectile, progress) {
-    const x = projectile.start.x + (projectile.end.x - projectile.start.x) * progress;
+    const path = projectile.path || gridCellRoute(projectile.start, projectile.end);
+    const pathPosition = Math.min(path.length - 1, Math.max(0, progress * (path.length - 1)));
+    const index = Math.floor(pathPosition);
+    const segmentProgress = pathPosition - index;
+    const first = path[index];
+    const second = path[Math.min(index + 1, path.length - 1)];
+    const x = first.x + (second.x - first.x) * segmentProgress;
     const distance = Math.hypot(projectile.end.x - projectile.start.x, projectile.end.y - projectile.start.y);
     const arc = Math.min(90, distance * 0.18);
-    const y = projectile.start.y + (projectile.end.y - projectile.start.y) * progress - Math.sin(Math.PI * progress) * arc;
+    const y = first.y + (second.y - first.y) * segmentProgress - Math.sin(Math.PI * progress) * arc;
     return { x, y };
   }
 
@@ -238,6 +542,20 @@
   function drawProjectileLayer() {
     if (projectilePreview) drawProjectileEffect(projectilePreview, 0.88, true);
     const now = performance.now();
+    for (const mark of projectileMarks) {
+      const token = state.tokens.find(item => item.id === mark.tokenId);
+      if (!token) continue;
+      const progress = Math.min(1, (now - mark.startedAt) / mark.duration);
+      context.save();
+      context.globalAlpha = 1 - progress;
+      context.strokeStyle = projectileColor(mark.kind);
+      context.lineWidth = 3 / zoom;
+      context.setLineDash([6 / zoom, 3 / zoom]);
+      context.beginPath();
+      context.arc(token.x, token.y, (token.radius || 22) + 8 / zoom, 0, Math.PI * 2);
+      context.stroke();
+      context.restore();
+    }
     for (const impact of projectileImpacts) {
       const progress = Math.min(1, (now - impact.startedAt) / impact.duration);
       context.save();
@@ -245,26 +563,114 @@
       context.strokeStyle = projectileColor(impact.kind);
       context.lineWidth = 2 / zoom;
       context.beginPath();
-      context.arc(impact.end.x, impact.end.y, (4 + progress * 22) / zoom, 0, Math.PI * 2);
+      context.arc(impact.end.x, impact.end.y, impact.aoe * GRID + progress * 22 / zoom, 0, Math.PI * 2);
       context.stroke();
       context.restore();
     }
     for (const projectile of activeProjectiles) {
-      const progress = Math.min(1, (now - projectile.startedAt) / projectile.duration);
-      drawProjectileEffect(projectile, progress);
+      drawProjectileEffect(projectile, projectile.progress);
     }
   }
 
   function animateProjectiles() {
     projectileFrame = null;
     const now = performance.now();
-    for (const projectile of activeProjectiles) {
-      if (now - projectile.startedAt >= projectile.duration) projectileImpacts.push({ end: projectile.end, kind: projectile.kind, startedAt: now, duration: 240 });
-    }
-    activeProjectiles = activeProjectiles.filter(projectile => now - projectile.startedAt < projectile.duration);
     projectileImpacts = projectileImpacts.filter(impact => now - impact.startedAt < impact.duration);
+    projectileMarks = projectileMarks.filter(mark => now - mark.startedAt < mark.duration && state.tokens.some(token => token.id === mark.tokenId));
     render();
-    if (activeProjectiles.length || projectileImpacts.length) projectileFrame = requestAnimationFrame(animateProjectiles);
+    if (projectileImpacts.length || projectileMarks.length) projectileFrame = requestAnimationFrame(animateProjectiles);
+  }
+
+  function projectileSettings() {
+    const angleValue = document.querySelector('#projectileAngle').value;
+    const aoe = Number(document.querySelector('#projectileAoe').value);
+    const speed = Number(document.querySelector('#projectileSpeed').value);
+    return {
+      kind: document.querySelector('#projectileType').value,
+      angle: angleValue === '' ? null : Number(angleValue),
+      aoe: Number.isFinite(aoe) ? Math.max(0, Math.min(20, aoe)) : 0,
+      speed: Number.isFinite(speed) ? Math.max(0.1, Math.min(20, speed)) : 1,
+      damage: Math.max(0, Math.min(1000, Number(document.querySelector('#projectileDamage').value) || 0)),
+      pierce: document.querySelector('#projectilePierce').checked,
+      instant: document.querySelector('#projectileInstant').checked
+    };
+  }
+
+  function projectileEndForAngle(start, target, angle) {
+    let endpoint = { ...target };
+    if (Number.isFinite(angle)) {
+      const distance = Math.hypot(target.x - start.x, target.y - start.y);
+      const radians = angle * Math.PI / 180;
+      endpoint = { x: start.x + Math.cos(radians) * distance, y: start.y + Math.sin(radians) * distance };
+    }
+    return { x: snapCellCenter(endpoint.x), y: snapCellCenter(endpoint.y) };
+  }
+
+  function markProjectileToken(projectile, token) {
+    if (projectile.markedTokenIds.has(token.id)) return;
+    projectile.markedTokenIds.add(token.id);
+    projectileMarks.push({ tokenId: token.id, kind: projectile.kind, startedAt: performance.now(), duration: 1200 });
+    if ((hostMode || !connections.has('host')) && projectile.damage > 0) {
+      const character = state.health.characters.find(item => String(item.linkedTokenId || '') === String(token.id));
+      if (character) {
+        character.vitality = Math.max(0, Number(character.vitality ?? character.hp ?? 0) - projectile.damage);
+        state.health.damageEffect = { id: `${projectile.id}:${token.id}`, damage: projectile.damage, emoji: state.health.damageEmoji || '💥' };
+        broadcastState('projectile');
+      }
+    }
+    if (projectileFrame === null) projectileFrame = requestAnimationFrame(animateProjectiles);
+  }
+
+  function moveProjectileTo(projectile, targetIndex) {
+    const nextIndex = Math.min(projectile.path.length - 1, targetIndex);
+    const firstNewCell = Math.floor(projectile.pathIndex) + 1;
+    for (let index = firstNewCell; index <= Math.floor(nextIndex); index++) {
+      const cell = projectile.path[index];
+      const token = state.tokens.find(item => item.x === cell.x && item.y === cell.y);
+      if (!token) continue;
+      markProjectileToken(projectile, token);
+      if (!projectile.pierce) {
+        projectile.path = projectile.path.slice(0, index + 1);
+        projectile.pathIndex = index;
+        projectile.progress = 1;
+        projectile.end = cell;
+        return true;
+      }
+    }
+    projectile.pathIndex = nextIndex;
+    projectile.progress = projectile.path.length > 1 ? nextIndex / (projectile.path.length - 1) : 1;
+    return nextIndex >= projectile.path.length - 1;
+  }
+
+  function markProjectileAoe(projectile) {
+    const radius = projectile.aoe * GRID;
+    if (!radius) return;
+    for (const token of state.tokens) {
+      if (Math.hypot(token.x - projectile.end.x, token.y - projectile.end.y) <= radius) markProjectileToken(projectile, token);
+    }
+  }
+
+  function addProjectileImpact(projectile) {
+    markProjectileAoe(projectile);
+    projectileImpacts.push({ end: projectile.end, kind: projectile.kind, aoe: projectile.aoe, startedAt: performance.now(), duration: 360 });
+    if (projectileFrame === null) projectileFrame = requestAnimationFrame(animateProjectiles);
+  }
+
+  function advanceProjectiles(id = crypto.randomUUID(), relay = true) {
+    if (seenProjectileTurns.has(id)) return false;
+    seenProjectileTurns.add(id);
+    if (seenProjectileTurns.size > 256) seenProjectileTurns.delete(seenProjectileTurns.values().next().value);
+    for (const projectile of activeProjectiles) {
+      if (moveProjectileTo(projectile, projectile.pathIndex + projectile.speed)) addProjectileImpact(projectile);
+    }
+    activeProjectiles = activeProjectiles.filter(projectile => projectile.progress < 1);
+    if (relay) {
+      const message = { type: 'projectile-turn', id };
+      if (hostMode) broadcast(message);
+      else if (connections.has('host')) connections.get('host').send(message);
+    }
+    render();
+    return true;
   }
 
   function drawLocatedTokenMarker() {
@@ -281,10 +687,7 @@
     context.restore();
   }
 
-  function render() {
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    if (!width || !height) return;
+  function drawMapScene(width, height) {
     context.clearRect(0, 0, width, height);
     context.save();
     context.translate(width / 2 + panX, height / 2 + panY);
@@ -312,8 +715,16 @@
     context.restore();
     context.strokeStyle = '#a8b992';
     context.lineWidth = 2 / zoom;
-    context.stroke(boardPath);
+    if (state.map.shape === 'circle' || state.map.shape === 'triangle') context.stroke(mapOutlinePath(mapWorldBounds()));
+    else context.stroke(boardPath);
     context.restore();
+  }
+
+  function render() {
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (!width || !height) return;
+    drawMapScene(width, height);
     drawDragReadout();
     updateOpacityControl();
     updateMapControls();
@@ -321,6 +732,7 @@
     updateObjectCount();
     updateInspectorSelection();
     document.querySelector('#canvasHint').classList.toggle('hidden', state.tokens.length + state.tiles.length + state.shapes.length > 0);
+    updateMagnifier();
   }
 
   function drawGrid(width, height) {
@@ -358,24 +770,22 @@
 
   function drawShape(shape, preview = false) {
     context.save();
-    context.strokeStyle = shape.color || '#f4c95d';
-    context.fillStyle = shape.color || '#f4c95d';
-    context.globalAlpha = opacityOf(shape) * (preview ? 0.72 : 1);
+    context.strokeStyle = shape.mode === 'construction' ? '#9cac9d' : shape.mode === 'alert' ? '#ef755b' : shape.color || '#f4c95d';
+    context.fillStyle = shape.mode === 'construction' ? '#829387' : shape.mode === 'alert' ? '#e06d52' : shape.color || '#f4c95d';
+    context.globalAlpha = opacityOf(shape) * (shape.mode === 'construction' ? 0.58 : shape.mode === 'alert' ? 0.34 : 1) * (preview ? 0.72 : 1);
     if (shape.kind === 'stroke') {
       for (const cell of shape.points) context.fillRect(cell.x - GRID / 2, cell.y - GRID / 2, GRID, GRID);
     } else if (shape.kind === 'line') {
       for (const cell of pixelLineCells(shape)) context.fillRect(cell.x - GRID / 2, cell.y - GRID / 2, GRID, GRID);
     } else {
-      context.lineWidth = (Number(shape.width) || 3) / zoom;
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
-      const x = Math.min(shape.x1, shape.x2), y = Math.min(shape.y1, shape.y2);
-      const w = Math.abs(shape.x2 - shape.x1), h = Math.abs(shape.y2 - shape.y1);
+      const bounds = shapeBounds(shape);
+      const rows = Math.max(1, Math.round(bounds.height / GRID));
       context.beginPath();
-      if (shape.kind === 'circle') context.ellipse(x + w / 2, y + h / 2, Math.max(w / 2, 1), Math.max(h / 2, 1), 0, 0, Math.PI * 2);
-      else context.rect(x, y, w, h);
+      for (let row = 0; row < rows; row++) {
+        const range = shapeCellRange(shape, row, bounds);
+        if (range.start < range.end) context.rect(bounds.x + range.start * GRID, bounds.y + row * GRID, (range.end - range.start) * GRID, GRID);
+      }
       context.fill();
-      context.stroke();
     }
     if (selectedId === shape.id && !preview) {
       context.globalAlpha = 1;
@@ -383,6 +793,22 @@
       drawSelection(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2, bounds.width, bounds.height);
     }
     context.restore();
+    if (!preview && shape.mode === 'alert') {
+      const bounds = shapeBounds(shape);
+      const label = shape.alertTriggered ? 'DISPARADO' : `ALERTA · ${Math.max(0, shape.alertTurnsRemaining)}T · ${Math.max(0, shape.alertDamage)}D`;
+      context.save();
+      context.font = `700 ${Math.max(9, 10 / zoom)}px "DM Mono", Consolas, monospace`;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      const labelWidth = context.measureText(label).width + 12 / zoom;
+      const labelX = bounds.x + bounds.width / 2;
+      const labelY = bounds.y - 12 / zoom;
+      context.fillStyle = '#351d1beF';
+      context.fillRect(labelX - labelWidth / 2, labelY - 9 / zoom, labelWidth, 18 / zoom);
+      context.fillStyle = '#ffd8c8';
+      context.fillText(label, labelX, labelY);
+      context.restore();
+    }
   }
 
   function shapeBounds(shape) {
@@ -402,19 +828,106 @@
         height: Math.abs(shape.y2 - shape.y1) + GRID
       };
     }
-    return { x: Math.min(shape.x1, shape.x2), y: Math.min(shape.y1, shape.y2), width: Math.abs(shape.x2 - shape.x1), height: Math.abs(shape.y2 - shape.y1) };
+    return {
+      x: Math.min(shape.x1, shape.x2), y: Math.min(shape.y1, shape.y2),
+      width: Math.max(GRID, Math.abs(shape.x2 - shape.x1)), height: Math.max(GRID, Math.abs(shape.y2 - shape.y1))
+    };
+  }
+
+  function shapeCellRange(shape, row, bounds = shapeBounds(shape)) {
+    const columns = Math.max(1, Math.round(bounds.width / GRID));
+    const rows = Math.max(1, Math.round(bounds.height / GRID));
+    if (row < 0 || row >= rows) return { start: 0, end: 0 };
+    if (shape.kind !== 'circle') return { start: 0, end: columns };
+    const y = (row + 0.5) / rows;
+    const halfWidth = Math.sqrt(Math.max(0, 1 - (2 * y - 1) ** 2)) / 2;
+    let start = Math.max(0, Math.ceil((0.5 - halfWidth) * columns - 0.5) - 1);
+    let end = Math.min(columns, Math.floor((0.5 + halfWidth) * columns - 0.5) + 2);
+    const inside = column => {
+      const x = (column + 0.5) / columns;
+      return ((x - 0.5) / 0.5) ** 2 + ((y - 0.5) / 0.5) ** 2 <= 1;
+    };
+    while (start < end && !inside(start)) start++;
+    while (end > start && !inside(end - 1)) end--;
+    return { start, end };
+  }
+
+  function shapeCellCount(shape) {
+    const bounds = shapeBounds(shape);
+    const rows = Math.max(1, Math.round(bounds.height / GRID));
+    let count = 0;
+    for (let row = 0; row < rows; row++) {
+      const range = shapeCellRange(shape, row, bounds);
+      count += range.end - range.start;
+    }
+    return count;
+  }
+
+  function shapeCellAtPoint(shape, point) {
+    const bounds = shapeBounds(shape);
+    const column = Math.floor((point.x - bounds.x) / GRID);
+    const row = Math.floor((point.y - bounds.y) / GRID);
+    const range = shapeCellRange(shape, row, bounds);
+    return column >= range.start && column < range.end;
+  }
+
+  function shapeContainsPoint(shape, point) {
+    const bounds = shapeBounds(shape);
+    if (point.x < bounds.x || point.x > bounds.x + bounds.width || point.y < bounds.y || point.y > bounds.y + bounds.height) return false;
+    if (shape.kind === 'stroke') return (shape.points || []).some(cell => Math.abs(point.x - cell.x) < GRID / 2 && Math.abs(point.y - cell.y) < GRID / 2);
+    if (shape.kind === 'line') return pixelLineCells(shape).some(cell => Math.abs(point.x - cell.x) < GRID / 2 && Math.abs(point.y - cell.y) < GRID / 2);
+    return shapeCellAtPoint(shape, point);
+  }
+
+  function constructionBlocksRoute(start, end) {
+    const route = gridCellRoute(start, end).slice(1);
+    return state.shapes.some(shape => {
+      if (shape.mode !== 'construction') return false;
+      const startsInside = shapeContainsPoint(shape, start);
+      const endsInside = shapeContainsPoint(shape, end);
+      if (startsInside && !endsInside) return false;
+      return route.some(point => shapeContainsPoint(shape, point));
+    });
+  }
+
+  function constructionBlocksPoint(point) {
+    return state.shapes.some(shape => shape.mode === 'construction' && shapeContainsPoint(shape, point));
+  }
+
+  function advanceShapeAlerts() {
+    let healthChanged = false;
+    for (const shape of state.shapes) {
+      if (shape.mode !== 'alert' || shape.alertTriggered) continue;
+      shape.alertTurnsRemaining = Math.max(0, Math.floor(Number(shape.alertTurnsRemaining) || 0) - 1);
+      if (shape.alertTurnsRemaining > 0) continue;
+      shape.alertTriggered = true;
+      const damage = Math.max(0, Math.min(1000, Number(shape.alertDamage) || 0));
+      if (!damage) continue;
+      for (const token of state.tokens) {
+        if (!shapeContainsPoint(shape, token)) continue;
+        const character = state.health.characters.find(item => String(item.linkedTokenId || '') === String(token.id));
+        if (!character) continue;
+        character.vitality = Math.max(0, Number(character.vitality ?? character.hp ?? 0) - damage);
+        if (!healthChanged) state.health.damageEffect = { id: `${shape.id}:${state.health.round}:${shape.alertTurnsTotal}`, damage, emoji: state.health.damageEmoji || '💥' };
+        healthChanged = true;
+      }
+    }
+    if (healthChanged) syncHealthToTokens();
   }
 
   function shapeFitsMap(shape, config = state.map) {
     if (shape.kind === 'stroke') return shape.points.every(point => pointInsideMap(point, config));
     if (shape.kind === 'line') return pixelLineCells(shape).every(point => pointInsideMap(point, config));
     const bounds = shapeBounds(shape);
-    return [
-      { x: bounds.x + GRID / 2, y: bounds.y + GRID / 2 },
-      { x: bounds.x + bounds.width - GRID / 2, y: bounds.y + GRID / 2 },
-      { x: bounds.x + GRID / 2, y: bounds.y + bounds.height - GRID / 2 },
-      { x: bounds.x + bounds.width - GRID / 2, y: bounds.y + bounds.height - GRID / 2 }
-    ].every(point => pointInsideMap(point, config));
+    const columns = Math.max(1, Math.round(bounds.width / GRID));
+    const rows = Math.max(1, Math.round(bounds.height / GRID));
+    for (let row = 0; row < rows; row++) {
+      const range = shapeCellRange(shape, row, bounds);
+      for (let column = range.start; column < range.end; column++) {
+        if (!pointInsideMap({ x: bounds.x + (column + 0.5) * GRID, y: bounds.y + (row + 0.5) * GRID }, config)) return false;
+      }
+    }
+    return columns > 0;
   }
 
   function pixelLineCells(shape) {
@@ -442,10 +955,29 @@
   function shapeTileReadout(shape) {
     if (shape.kind === 'stroke') return `${shape.points.length} ${shape.points.length === 1 ? 'tile' : 'tiles'}`;
     if (shape.kind === 'line') return `${pixelLineCells(shape).length} ${pixelLineCells(shape).length === 1 ? 'tile' : 'tiles'}`;
-    const columns = Math.max(1, Math.round(Math.abs(shape.x2 - shape.x1) / GRID));
-    const rows = Math.max(1, Math.round(Math.abs(shape.y2 - shape.y1) / GRID));
-    const total = columns * rows;
+    const bounds = shapeBounds(shape);
+    const columns = Math.max(1, Math.round(bounds.width / GRID));
+    const rows = Math.max(1, Math.round(bounds.height / GRID));
+    const total = shapeCellCount(shape);
     return `${columns} × ${rows} tiles · ${total} total`;
+  }
+
+  function syncRgbChannels(color) {
+    const hex = String(color).replace('#', '');
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return;
+    ['red', 'green', 'blue'].forEach((channel, index) => {
+      const value = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+      document.querySelector(`#drawColor${channel}`).value = String(value);
+      document.querySelector(`#drawColor${channel}Value`).textContent = String(value);
+    });
+    document.querySelector('#drawColorValue').textContent = `#${hex.toUpperCase()}`;
+  }
+
+  function updateDrawColorFromRgb() {
+    const values = ['red', 'green', 'blue'].map(channel => Number(document.querySelector(`#drawColor${channel}`).value));
+    const color = `#${values.map(value => Math.max(0, Math.min(255, value)).toString(16).padStart(2, '0')).join('')}`;
+    document.querySelector('#drawColor').value = color;
+    syncRgbChannels(color);
   }
 
   function drawDragReadout() {
@@ -491,6 +1023,19 @@
     context.fillRect(token.x - labelWidth / 2 - 5 / zoom, token.y + radius + 5 / zoom, labelWidth + 10 / zoom, 18 / zoom);
     context.fillStyle = '#e5e7dc'; context.fillText(label, token.x, token.y + radius + 8 / zoom);
     context.restore();
+    if (token.health && token.health.vitalityMax > 0 && token.health.lucidityMax > 0) {
+      const barWidth = radius * 1.9;
+      const barX = token.x - barWidth / 2;
+      const barY = token.y + radius + 25 / zoom;
+      context.save();
+      context.fillStyle = '#171a19e8';
+      context.fillRect(barX - 2 / zoom, barY - 2 / zoom, barWidth + 4 / zoom, 10 / zoom);
+      context.fillStyle = '#df8568';
+      context.fillRect(barX, barY, barWidth * Math.max(0, Math.min(1, token.health.vitality / token.health.vitalityMax)), 3 / zoom);
+      context.fillStyle = '#91b8c3';
+      context.fillRect(barX, barY + 4 / zoom, barWidth * Math.max(0, Math.min(1, token.health.lucidity / token.health.lucidityMax)), 3 / zoom);
+      context.restore();
+    }
     if (selectedId === token.id) {
       context.save(); context.setLineDash([4 / zoom, 4 / zoom]); context.strokeStyle = '#c1d48a'; context.lineWidth = 1.5 / zoom;
       context.beginPath(); context.arc(token.x, token.y, radius + 5 / zoom, 0, Math.PI * 2); context.stroke(); context.restore();
@@ -524,8 +1069,6 @@
     document.querySelector('#selectionOptions').hidden = tool !== 'select';
     document.querySelector('#selectionOptions').style.display = tool === 'select' ? 'flex' : 'none';
     document.querySelector('#colorOptions').hidden = !['line', 'straight-line', 'circle', 'square'].includes(tool);
-    document.querySelector('label[for="lineWidth"]').hidden = ['line', 'straight-line'].includes(tool);
-    document.querySelector('#lineWidth').hidden = ['line', 'straight-line'].includes(tool);
     document.querySelector('#tokenOptions').hidden = tool !== 'token';
     document.querySelector('#locateOptions').hidden = tool !== 'locate';
     document.querySelector('#projectileOptions').hidden = tool !== 'projectile';
@@ -537,18 +1080,9 @@
   function normalizeMapConfig(config = {}) {
     const allowedShapes = ['rectangle', 'square', 'circle', 'triangle'];
     const shape = allowedShapes.includes(config.shape) ? config.shape : DEFAULT_MAP.shape;
-    let width = Math.max(1, Math.min(MAX_MAP_TILES, Math.floor(Number(config.width) || DEFAULT_MAP.width)));
-    let height = Math.max(1, Math.min(MAX_MAP_TILES, Math.floor(Number(config.height) || DEFAULT_MAP.height)));
+    let width = Math.max(1, Math.min(MAX_MAP_DIMENSION, Math.floor(Number(config.width) || DEFAULT_MAP.width)));
+    let height = Math.max(1, Math.min(MAX_MAP_DIMENSION, Math.floor(Number(config.height) || DEFAULT_MAP.height)));
     if (shape === 'square' || shape === 'circle') height = width;
-    if (width * height > MAX_MAP_TILES) {
-      const scale = Math.sqrt(MAX_MAP_TILES / (width * height));
-      width = Math.max(1, Math.floor(width * scale));
-      height = Math.max(1, Math.floor(height * scale));
-      while (width * height > MAX_MAP_TILES) {
-        if (width >= height) width--;
-        else height--;
-      }
-    }
     return { shape, width, height };
   }
 
@@ -563,6 +1097,8 @@
     const defaultOpacity = clampOpacity(mapState.opacity);
     return {
       ...mapState,
+      health: mapState.health && Array.isArray(mapState.health.characters) ? mapState.health : defaultHealthState(),
+      gridVisible: mapState.gridVisible !== false,
       opacity: defaultOpacity,
       map: normalizeMapConfig(mapState.map),
       initiative: normalizeInitiative(mapState.initiative, mapState.tokens),
@@ -645,6 +1181,8 @@
         if (pixelLineCells(shape).some(cell => Math.abs(point.x - cell.x) <= GRID / 2 && Math.abs(point.y - cell.y) <= GRID / 2)) return shape;
       } else if (shape.kind === 'stroke') {
         if (shape.points.some(cell => Math.abs(point.x - cell.x) <= GRID / 2 && Math.abs(point.y - cell.y) <= GRID / 2)) return shape;
+      } else if (shape.kind === 'circle' && shape.filled) {
+        if (shapeCellAtPoint(shape, point)) return shape;
       } else if (shape.kind === 'square' || shape.filled) return shape;
       else {
         const rx = Math.max(bounds.width / 2, 1), ry = Math.max(bounds.height / 2, 1);
@@ -653,6 +1191,19 @@
       }
     }
     return null;
+  }
+
+  function drawingShapeMetadata() {
+    const mode = document.querySelector('#shapeMode').value;
+    if (mode !== 'alert') return { mode };
+    const turns = Math.max(1, Math.min(99, Math.floor(Number(document.querySelector('#shapeAlertTurns').value) || 1)));
+    return {
+      mode,
+      alertDamage: Math.max(0, Math.min(1000, Number(document.querySelector('#shapeAlertDamage').value) || 0)),
+      alertTurnsTotal: turns,
+      alertTurnsRemaining: turns,
+      alertTriggered: false
+    };
   }
 
   function paintTile(point) {
@@ -686,7 +1237,7 @@
         linePreview = { id: 'line-preview', kind: 'line', x1: endpoint.x, y1: endpoint.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity };
         dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(linePreview) };
       } else {
-        const line = { id: crypto.randomUUID(), kind: 'line', x1: pendingLineStart.x, y1: pendingLineStart.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity };
+        const line = { id: crypto.randomUUID(), kind: 'line', x1: pendingLineStart.x, y1: pendingLineStart.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, ...drawingShapeMetadata() };
         state.shapes.push(line);
         selectedId = line.id;
         pendingLineStart = null;
@@ -703,6 +1254,7 @@
       if (token) {
         const destination = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
         if (!pointInsideMap(destination)) return;
+        if (constructionBlocksRoute(token, destination)) { showToast('Uma construção bloqueia essa rota.'); return; }
         token.x = destination.x;
         token.y = destination.y;
         selectedId = token.id;
@@ -730,16 +1282,18 @@
       const position = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
       if (!pointInsideMap(position)) return;
       if (!pendingProjectileStart) {
-        pendingProjectileStart = { ...position, kind: document.querySelector('#projectileType').value };
-        projectilePreview = { start: position, end: position, kind: pendingProjectileStart.kind };
+        pendingProjectileStart = { ...position };
+        projectilePreview = { start: position, end: position, aimEnd: position, kind: document.querySelector('#projectileType').value };
         render();
       } else {
         const start = { x: pendingProjectileStart.x, y: pendingProjectileStart.y };
-        const kind = pendingProjectileStart.kind;
+        const settings = projectileSettings();
+        const end = projectileEndForAngle(start, position, settings.angle);
+        if (!pointInsideMap(end)) { showToast('O destino calculado fica fora do mapa.'); return; }
         pendingProjectileStart = null;
         projectilePreview = null;
         dragReadout = null;
-        launchProjectile(start, position, kind);
+        launchProjectile(start, end, settings);
       }
       return;
     }
@@ -748,6 +1302,7 @@
     if (tool === 'token') {
       const position = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
       if (!pointInsideMap(position)) return;
+      if (constructionBlocksPoint(position)) { showToast('Não é possível posicionar um token dentro de uma construção.'); return; }
       currentToken = { id: crypto.randomUUID(), ...position, radius: 22, name: document.querySelector('#tokenName').value.trim() || 'Token', color: document.querySelector('#tokenColor').value, opacity: state.opacity };
       dragReadout = { x: screen.x, y: screen.y, startX: point.x, startY: point.y, text: '0 tiles' };
       render(); return;
@@ -758,8 +1313,8 @@
       const x = align(point.x), y = align(point.y);
       if (!pointInsideMap({ x, y })) return;
       currentShape = tool === 'line'
-        ? { id: crypto.randomUUID(), kind: 'stroke', points: [{ x, y }], color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity }
-        : { id: crypto.randomUUID(), kind: tool, x1: x, y1: y, x2: x, y2: y, color: document.querySelector('#drawColor').value, width: Number(document.querySelector('#lineWidth').value), filled: true, opacity: state.opacity };
+        ? { id: crypto.randomUUID(), kind: 'stroke', points: [{ x, y }], color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, ...drawingShapeMetadata() }
+        : { id: crypto.randomUUID(), kind: tool, x1: x, y1: y, x2: x, y2: y, color: document.querySelector('#drawColor').value, filled: true, opacity: state.opacity, ...drawingShapeMetadata() };
       dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(currentShape) };
       render(); return;
     }
@@ -781,8 +1336,10 @@
 
   function onPointerMove(event) {
     const screen = pointerPosition(event);
+    magnifierPointer = screen;
     const point = screenToWorld(screen);
     aimWorld = aimPointFor(point);
+    if (magnifierMode !== 0) updateMagnifier();
     document.querySelector('#coordinates').textContent = `X ${String(Math.round(point.x)).padStart(3, '0')} · Y ${String(Math.round(point.y)).padStart(3, '0')}`;
     if (panPointer && panPointer.id === event.pointerId) {
       panX = panPointer.panX + screen.x - panPointer.x;
@@ -797,9 +1354,11 @@
         dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(linePreview) };
       }
       if (tool === 'projectile' && pendingProjectileStart) {
-        const endpoint = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
-        projectilePreview = { start: { x: pendingProjectileStart.x, y: pendingProjectileStart.y }, end: endpoint, kind: pendingProjectileStart.kind };
-        const tiles = Math.ceil(Math.hypot(endpoint.x - pendingProjectileStart.x, endpoint.y - pendingProjectileStart.y) / GRID);
+        const target = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
+        const settings = projectileSettings();
+        const endpoint = projectileEndForAngle(pendingProjectileStart, target, settings.angle);
+        projectilePreview = { start: { x: pendingProjectileStart.x, y: pendingProjectileStart.y }, end: endpoint, aimEnd: target, kind: settings.kind };
+        const tiles = Math.ceil(Math.hypot(target.x - pendingProjectileStart.x, target.y - pendingProjectileStart.y) / GRID);
         dragReadout = { x: screen.x, y: screen.y, text: `${tiles} tiles` };
       }
       if (tool === 'select' && pendingTokenMove) {
@@ -848,6 +1407,7 @@
       if (token) {
         const destination = { x: snapCellCenter(point.x - dragToken.offsetX), y: snapCellCenter(point.y - dragToken.offsetY) };
         if (!pointInsideMap(destination)) { render(); return; }
+        if (constructionBlocksRoute({ x: dragToken.startX, y: dragToken.startY }, destination)) { render(); return; }
         token.x = destination.x; token.y = destination.y;
         dragToken.didMove = token.x !== dragToken.startX || token.y !== dragToken.startY;
         movementRoute.end = { x: token.x, y: token.y };
@@ -984,9 +1544,9 @@
     document.querySelector('#mapRatioField').hidden = map.shape !== 'rectangle';
     document.querySelector('#mapRatio').hidden = map.shape !== 'rectangle';
     document.querySelector('#mapRatio').value = mapRatioFor(map);
-    document.querySelector('#mapWidth').max = String(Math.floor(MAX_MAP_TILES / map.height));
-    document.querySelector('#mapHeight').max = String(Math.floor(MAX_MAP_TILES / map.width));
-    document.querySelector('#mapCapacity').textContent = `${countMapTiles(map).toLocaleString('pt-BR')} / ${MAX_MAP_TILES.toLocaleString('pt-BR')} tiles`;
+    document.querySelector('#mapWidth').max = String(MAX_MAP_DIMENSION);
+    document.querySelector('#mapHeight').max = String(MAX_MAP_DIMENSION);
+    document.querySelector('#mapCapacity').textContent = `${countMapTiles(map).toLocaleString('pt-BR')} tiles`;
   }
 
   function updateInitiativePanel() {
@@ -1040,6 +1600,8 @@
       state.initiative.round++;
       state.initiative.activeTokenId = ordered[0].tokenId;
     } else state.initiative.activeTokenId = ordered[nextIndex].tokenId;
+    advanceShapeAlerts();
+    advanceProjectiles();
     broadcastState();
     focusToken(state.initiative.activeTokenId);
   }
@@ -1056,19 +1618,31 @@
     render();
   }
 
-  function launchProjectile(start, end, kind, id = crypto.randomUUID(), duration = null, relay = true) {
+  function launchProjectile(start, end, settings, id = crypto.randomUUID(), relay = true) {
+    const kind = settings?.kind;
     if (!['arrow', 'fire', 'arcane'].includes(kind) || !Number.isFinite(start?.x) || !Number.isFinite(start?.y) || !Number.isFinite(end?.x) || !Number.isFinite(end?.y) || !pointInsideMap(start) || !pointInsideMap(end) || seenProjectiles.has(id)) return false;
     seenProjectiles.add(id);
     if (seenProjectiles.size > 256) seenProjectiles.delete(seenProjectiles.values().next().value);
-    const flightDuration = Math.max(360, Math.min(1400, duration || 420 + Math.hypot(end.x - start.x, end.y - start.y) * 0.22));
-    const projectile = { id, start, end, kind, duration: flightDuration, startedAt: performance.now() };
-    activeProjectiles.push(projectile);
+    const aoe = Number.isFinite(Number(settings.aoe)) ? Math.max(0, Math.min(20, Number(settings.aoe))) : 0;
+    const speed = Number.isFinite(Number(settings.speed)) ? Math.max(0.1, Math.min(20, Number(settings.speed))) : 1;
+    const damage = Number.isFinite(Number(settings.damage)) ? Math.max(0, Math.min(1000, Number(settings.damage))) : 0;
+    const pierce = Boolean(settings.pierce);
+    const path = gridCellRoute(start, end);
+    const projectile = {
+      id, start: { ...start }, end: { ...end }, kind, aoe, speed, damage, pierce, path,
+      pathIndex: 0, progress: 0, markedTokenIds: new Set()
+    };
+    if (settings.instant) {
+      moveProjectileTo(projectile, path.length - 1);
+      projectile.progress = 1;
+      addProjectileImpact(projectile);
+    } else activeProjectiles.push(projectile);
     if (relay) {
-      const message = { type: 'projectile', projectile: { id, start, end, kind, duration: flightDuration } };
+      const message = { type: 'projectile', projectile: { id, start, end, kind, aoe, speed, damage, pierce, instant: Boolean(settings.instant) } };
       if (hostMode) broadcast(message);
       else if (connections.has('host')) connections.get('host').send(message);
     }
-    if (projectileFrame === null) projectileFrame = requestAnimationFrame(animateProjectiles);
+    render();
     return true;
   }
 
@@ -1106,7 +1680,8 @@
     const details = document.querySelector('#selectedDetails');
     if (!selected) { details.replaceChildren(); return; }
     const label = selected.name || ({ line: 'Linha', circle: 'Círculo', square: 'Quadrado' }[selected.kind] || 'Tile');
-    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>`;
+    const shapeControls = state.shapes.includes(selected) ? `<div class="selected-shape-mode"><label class="field-label" for="selectedShapeMode">MODO</label><select class="text-input" id="selectedShapeMode" data-shape-field="mode"><option value="free" ${selected.mode !== 'construction' && selected.mode !== 'alert' ? 'selected' : ''}>Livre</option><option value="construction" ${selected.mode === 'construction' ? 'selected' : ''}>Construção · bloqueia</option><option value="alert" ${selected.mode === 'alert' ? 'selected' : ''}>Alerta · dano após turnos</option></select>${selected.mode === 'alert' ? `<label class="field-label spacing-top" for="selectedAlertTurns">TURNOS RESTANTES</label><input class="text-input" id="selectedAlertTurns" type="number" min="1" max="99" value="${Math.max(1, selected.alertTurnsRemaining || selected.alertTurnsTotal || 1)}" data-shape-field="alertTurnsRemaining"><label class="field-label spacing-top" for="selectedAlertDamage">DANO</label><input class="text-input" id="selectedAlertDamage" type="number" min="0" max="1000" value="${Math.max(0, selected.alertDamage || 0)}" data-shape-field="alertDamage">` : ''}</div>` : '';
+    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>${shapeControls}`;
     details.querySelector('.delete-selected').addEventListener('click', deleteSelected);
   }
 
@@ -1126,8 +1701,10 @@
   function moveSelectedToken(dx, dy) {
     const token = state.tokens.find(item => item.id === selectedId);
     if (!token) return false;
-    token.x += dx * GRID;
-    token.y += dy * GRID;
+    const destination = { x: token.x + dx * GRID, y: token.y + dy * GRID };
+    if (!pointInsideMap(destination) || constructionBlocksRoute(token, destination)) { showToast('Uma construção bloqueia essa rota.'); return true; }
+    token.x = destination.x;
+    token.y = destination.y;
     broadcastState();
     return true;
   }
@@ -1154,7 +1731,7 @@
     codeInput.value = roomId;
     disconnectPeer(); hostMode = true;
     setConnectionStatus('connecting', 'Criando sala…');
-    peer = new Peer(`talus-${roomId}`, { debug: 1 });
+    peer = new Peer(`stone-plate-${roomId}`, { debug: 1 });
     peer.on('open', () => {
       setConnectionStatus('online', `Sala ${roomId}`);
       document.querySelector('#inviteNote').textContent = `Compartilhe o código ${roomId} para convidar jogadores.`;
@@ -1177,7 +1754,7 @@
     setConnectionStatus('connecting', 'Conectando…');
     peer = new Peer(undefined, { debug: 1 });
     peer.on('open', () => {
-      const connection = peer.connect(`talus-${roomId}`, { reliable: true });
+      const connection = peer.connect(`stone-plate-${roomId}`, { reliable: true });
       connections.set('host', connection);
       connection.on('open', () => {
         setConnectionStatus('online', `Sala ${roomId}`);
@@ -1202,19 +1779,25 @@
   function wireConnection(connection, id) {
     connection.on('data', message => {
       if (!message) return;
+      if (message.type === 'dice-roll') { receiveDiceRoll(message.roll, 'peer'); return; }
       if (message.type === 'projectile' && message.projectile) {
         const projectile = message.projectile;
-        const accepted = launchProjectile(projectile.start, projectile.end, projectile.kind, projectile.id, projectile.duration, false);
+        const accepted = launchProjectile(projectile.start, projectile.end, projectile, projectile.id, false);
+        if (accepted && hostMode) broadcast(message);
+        return;
+      }
+      if (message.type === 'projectile-turn' && message.id) {
+        const accepted = advanceProjectiles(message.id, false);
         if (accepted && hostMode) broadcast(message);
         return;
       }
       if (message.type !== 'state' || !message.state) return;
       if (!Array.isArray(message.state.tokens) || !Array.isArray(message.state.tiles) || !Array.isArray(message.state.shapes)) return;
       if (!hostMode && id === 'host') {
-        state = alignStateToGrid(message.state); saveState(); render(); return;
+        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); return;
       }
       if (hostMode) {
-        state = alignStateToGrid(message.state); saveState(); render(); broadcast({ type: 'state', state });
+        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); broadcast({ type: 'state', state });
       }
     });
     connection.on('close', () => { connections.delete(id); updatePlayers(); });
@@ -1235,6 +1818,26 @@
     document.querySelector('#playerCount').textContent = String(index + 1);
   }
 
+  function setWorkspace(view) {
+    const showCharacters = view === 'characters';
+    document.querySelector('#workspace').hidden = showCharacters;
+    document.querySelector('#healthWorkspace').hidden = !showCharacters;
+    document.querySelector('#mapViewButton').classList.toggle('active', !showCharacters);
+    document.querySelector('#mapViewButton').setAttribute('aria-pressed', String(!showCharacters));
+    document.querySelector('#charactersViewButton').classList.toggle('active', showCharacters);
+    document.querySelector('#charactersViewButton').setAttribute('aria-pressed', String(showCharacters));
+    if (!showCharacters) resizeCanvas();
+  }
+
+  stateChannel?.addEventListener('message', event => {
+    if (event.data?.type === 'dice-roll') { receiveDiceRoll(event.data.roll, 'channel'); return; }
+    if (event.data?.type !== 'state' || !event.data.state) return;
+    state = alignStateToGrid(event.data.state);
+    gridVisible = state.gridVisible !== false;
+    render();
+    notifyStateSubscribers();
+  });
+
   function disconnectPeer(resetStatus = true) {
     for (const connection of connections.values()) connection.close();
     connections.clear();
@@ -1245,7 +1848,7 @@
   function exportMap() {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob); link.download = 'talus-mapa.json'; link.click();
+    link.href = URL.createObjectURL(blob); link.download = 'stone-plate-mapa.json'; link.click();
     URL.revokeObjectURL(link.href);
   }
 
@@ -1255,12 +1858,15 @@
       try {
         const imported = JSON.parse(reader.result);
         if (!Array.isArray(imported.tokens) || !Array.isArray(imported.tiles) || !Array.isArray(imported.shapes)) throw new Error('Formato inválido');
-        state = alignStateToGrid(imported); selectedId = null; broadcastState(); showToast('Mapa importado.');
+        state = alignStateToGrid({ ...imported, health: imported.health || state.health }); selectedId = null; broadcastState(); showToast('Mapa importado.');
       } catch (error) { showToast('Arquivo de mapa inválido.'); }
     };
     reader.readAsText(file);
   }
 
+  document.querySelector('#mapViewButton').addEventListener('click', () => setWorkspace('map'));
+  document.querySelector('#charactersViewButton').addEventListener('click', () => setWorkspace('characters'));
+  window.StonePlateCharacters?.mount(window.StonePlate);
   document.querySelectorAll('.tool-button[data-tool]').forEach(button => button.addEventListener('click', () => setTool(button.dataset.tool)));
   document.querySelector('#tilePalette').addEventListener('click', event => {
     const button = event.target.closest('[data-tile]');
@@ -1268,9 +1874,42 @@
     tileType = button.dataset.tile;
     document.querySelectorAll('.tile-swatch').forEach(swatch => swatch.classList.toggle('active', swatch === button));
   });
-  document.querySelector('#drawColor').addEventListener('input', event => document.querySelector('#drawColorValue').textContent = event.target.value.toUpperCase());
+  document.querySelector('#drawColor').addEventListener('input', event => syncRgbChannels(event.target.value));
+  ['red', 'green', 'blue'].forEach(channel => document.querySelector(`#drawColor${channel}`).addEventListener('input', updateDrawColorFromRgb));
+  syncRgbChannels(document.querySelector('#drawColor').value);
+  document.querySelector('#shapeMode').addEventListener('change', event => {
+    document.querySelector('#shapeAlertOptions').hidden = event.target.value !== 'alert';
+  });
+  document.querySelector('#selectedDetails').addEventListener('change', event => {
+    const input = event.target.closest('[data-shape-field]');
+    const shape = state.shapes.find(item => item.id === selectedId);
+    if (!input || !shape) return;
+    if (input.dataset.shapeField === 'mode') {
+      shape.mode = input.value;
+      if (shape.mode === 'alert') {
+        const turns = Math.max(1, Math.min(99, Math.floor(Number(document.querySelector('#shapeAlertTurns').value) || 1)));
+        shape.alertTurnsTotal = shape.alertTurnsTotal || turns;
+        shape.alertTurnsRemaining = Math.max(1, shape.alertTurnsRemaining || turns);
+        shape.alertDamage = Math.max(0, Number(document.querySelector('#shapeAlertDamage').value) || 0);
+        shape.alertTriggered = false;
+      }
+    } else if (input.dataset.shapeField === 'alertTurnsRemaining') {
+      shape.alertTurnsRemaining = Math.max(1, Math.min(99, Math.floor(Number(input.value) || 1)));
+      shape.alertTurnsTotal = shape.alertTurnsRemaining;
+      shape.alertTriggered = false;
+    } else if (input.dataset.shapeField === 'alertDamage') shape.alertDamage = Math.max(0, Math.min(1000, Number(input.value) || 0));
+    broadcastState();
+  });
   document.querySelector('#tokenColor').addEventListener('input', event => document.querySelector('#tokenColorValue').textContent = event.target.value.toUpperCase());
-  document.querySelector('#lineWidth').addEventListener('input', event => document.querySelector('#lineWidthValue').textContent = event.target.value);
+  const updateProjectilePreview = () => {
+    if (!pendingProjectileStart || !projectilePreview) return;
+    const settings = projectileSettings();
+    projectilePreview.end = projectileEndForAngle(pendingProjectileStart, projectilePreview.aimEnd, settings.angle);
+    projectilePreview.kind = settings.kind;
+    render();
+  };
+  document.querySelector('#projectileAngle').addEventListener('input', updateProjectilePreview);
+  document.querySelector('#projectileType').addEventListener('change', updateProjectilePreview);
   document.querySelector('#objectOpacity').addEventListener('input', event => {
     state.opacity = clampOpacity(Number(event.target.value) / 100);
     for (const item of [...state.tokens, ...state.tiles, ...state.shapes]) item.opacity = state.opacity;
@@ -1312,10 +1951,10 @@
     try { await navigator.clipboard.writeText(roomId); showToast('Código da sala copiado.'); }
     catch (error) { document.querySelector('#roomCode').select(); showToast(`Código da sala: ${roomId}`); }
   });
-  document.querySelector('#gridToggle').addEventListener('click', event => { gridVisible = !gridVisible; event.currentTarget.classList.toggle('active', !gridVisible); render(); });
+  document.querySelector('#gridToggle').addEventListener('click', event => { gridVisible = !gridVisible; state.gridVisible = gridVisible; event.currentTarget.classList.toggle('active', !gridVisible); broadcastState(); });
   document.querySelector('#clearButton').addEventListener('click', () => {
     if (!state.tokens.length && !state.tiles.length && !state.shapes.length) return;
-    if (window.confirm('Remover todos os tokens, tiles e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity }; selectedId = null; broadcastState(); }
+    if (window.confirm('Remover todos os tokens, tiles e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity, health: state.health }; gridVisible = true; selectedId = null; broadcastState(); }
   });
   document.querySelector('#exportButton').addEventListener('click', exportMap);
   document.querySelector('#importButton').addEventListener('click', () => document.querySelector('#importFile').click());
@@ -1330,6 +1969,15 @@
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   canvas.addEventListener('wheel', event => {
     event.preventDefault();
+    if (magnifierMode !== 0) {
+      if (magnifierMode === 2) {
+        magnifierFixedZoom = Math.min(0.8, Math.max(0.1, magnifierFixedZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      } else {
+        magnifierZoom = Math.min(8, Math.max(1.5, magnifierZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      }
+      updateMagnifier();
+      return;
+    }
     const position = pointerPosition(event);
     zoomAt(zoom * (event.deltaY < 0 ? 1.08 : 1 / 1.08), position);
   }, { passive: false });
@@ -1341,6 +1989,12 @@
       if (!['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) && selectedId) deleteSelected();
     }
     if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (event.code === 'KeyM' && !event.repeat) {
+      event.preventDefault();
+      magnifierMode = (magnifierMode + 1) % 3;
+      updateMagnifier();
+      return;
+    }
     const movement = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[event.key];
     if (movement && moveSelectedToken(movement[0], movement[1])) { event.preventDefault(); return; }
     const shortcuts = { v: 'select', t: 'token', b: 'tile', l: 'line', r: 'straight-line', p: 'locate', j: 'projectile', c: 'circle', q: 'square' };
@@ -1349,5 +2003,7 @@
   window.addEventListener('keyup', event => { if (event.code === 'Space') delete canvas.dataset.space; });
   document.querySelector('#roomCode').addEventListener('keydown', event => { if (event.key === 'Enter') joinRoom(); });
 
-  setTool('select'); resizeCanvas(); updatePlayers();
+  ensureCharacterTokens(); syncHealthToTokens(); syncInitiativeFromHealth();
+  setTool('select'); resizeCanvas(); updatePlayers(); saveState();
+  if (new URLSearchParams(window.location.search).get('view') === 'characters') setWorkspace('characters');
 })();

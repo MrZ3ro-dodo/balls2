@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stone Plate — tela dos jogadores</title>
+    <link rel="stylesheet" href="players.css" />
+    <link rel="stylesheet" href="dice.css" />
+    <script src="players-map.js" defer></script>
+    <script src="dice.js" defer></script>
+  </head>
+  <body class="display-page">
+    <nav class="player-view-tabs" aria-label="Visualização pública">
+      <button type="button" class="active" data-player-view="map" aria-pressed="true">Mapa</button>
+      <button type="button" data-player-view="players" aria-pressed="false">Jogadores</button>
+    </nav>
+    <section id="playerMapPanel" class="player-map-panel" aria-label="Mapa da sessão">
+      <canvas id="playerMapCanvas" aria-label="Mapa da sessão"></canvas>
+      <div class="player-map-zoom" role="group" aria-label="Controles de zoom do mapa">
+        <button type="button" data-map-zoom="out" aria-label="Diminuir zoom" title="Diminuir zoom">−</button>
+        <button type="button" class="zoom-readout" data-map-zoom="reset" aria-label="Redefinir zoom" title="Redefinir zoom">100%</button>
+        <button type="button" data-map-zoom="in" aria-label="Aumentar zoom" title="Aumentar zoom">+</button>
+      </div>
+    </section>
+    <section id="playerCharactersPanel" class="player-characters-panel" aria-label="Painel dos jogadores" hidden>
+    <div class="health-overlay">
+      <div class="health-card">
+        <div class="health-bar">
+          <div id="healthFill"></div>
+          <div class="health-bar-text">
+            <span id="healthLabel">HP</span>
+          </div>
+        </div>
+        <div id="healthValueRow" class="health-value-row">
+          <span id="healthText">80 / 100</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="display-character-board" aria-label="Slots de personagens">
+      <div id="displayLeftColumn" class="display-character-column"></div>
+      <div id="displayRightColumn" class="display-character-column"></div>
+    </div>
+
+    <div id="displayImageWrapper" class="display-image-wrapper" hidden>
+      <div id="bossImageStage" class="boss-image-stage">
+        <img id="displayImage" alt="Imagem enviada para a tela" />
+        <div id="damageBurstLayer" class="damage-burst-layer"></div>
+      </div>
+    </div>
+    </section>
+
+    <script>
+      const CHANNEL_NAME = "stone-plate-state-v1";
+      const storageKey = "stone-plate-state-v1";
+      const broadcastChannel = "BroadcastChannel" in window ? new BroadcastChannel(CHANNEL_NAME) : null;
+      const EMOJI_AURA_OPTIONS = ["💥", "🔥", "⚡", "💣", "🗡️", "☠️", "🦖", "🐉", "👻", "🕸️", "🩸", "💀", "🧨", "☄️", "🌪️", "🌋", "❄️", "🧊", "🪓", "🛡️", "🔮", "🌀", "💫", "🌙", "🌩️"];
+      const EMOJI_DOMINANT_COLORS = {
+        "💥": "#ff6b6b",
+        "🔥": "#ff7a00",
+        "⚡": "#fbbf24",
+        "💣": "#7c2d12",
+        "🗡️": "#94a3b8",
+        "☠️": "#4b5563",
+        "🦖": "#16a34a",
+        "🐉": "#7c3aed",
+        "👻": "#e2e8f0",
+        "🕸️": "#0f172a",
+        "🩸": "#dc2626",
+        "💀": "#22c55e",
+        "🧨": "#fb923c",
+        "☄️": "#f59e0b",
+        "🌪️": "#60a5fa",
+        "🌋": "#f97316",
+        "❄️": "#bae6fd",
+        "🧊": "#cbd5e1",
+        "🪓": "#64748b",
+        "🛡️": "#38bdf8",
+        "🔮": "#a78bfa",
+        "🌀": "#8b5cf6",
+        "💫": "#fde68a",
+        "🌙": "#6366f1",
+        "🌩️": "#1d4ed8"
+      };
+      const BOSS_AFTER_IMAGE_OPTIONS = ["bruta", "devanecida", "leve", "forte", "colorida", "arco-íris"];
+      let emojiAuraLoopId = null;
+      let emojiAuraLoopId3 = null;
+      let emojiAuraLoopId5 = null;
+      let emojiTintTimeoutId = null;
+      let bossMovementAnimationFrame = null;
+      let bossMovementLastTimestamp = 0;
+      let bossAfterImageIntervalId = null;
+      let activeDamageNumberEffects = new Set();
+      let bossMovementBuggedCurrentX = 0;
+      let bossMovementBuggedCurrentY = 0;
+      let bossMovementBuggedTargetX = 0;
+      let bossMovementBuggedTargetY = 0;
+      let bossMovementBuggedTimer = 0;
+      let bossMovementScaleCurrent = 1;
+      let bossMovementScaleTarget = 1;
+      let bossMovementScaleTimer = 0;
+
+      function normalizeBossAfterImageModes(rawValue, fallback = []) {
+        const values = Array.isArray(rawValue)
+          ? rawValue
+          : typeof rawValue === "string"
+            ? rawValue.split(",")
+            : [];
+
+        const normalized = values
+          .map((value) => {
+            const normalizedValue = String(value || "").trim().toLowerCase();
+            if (normalizedValue === "soft") {
+              return "leve";
+            }
+            if (normalizedValue === "strong") {
+              return "forte";
+            }
+            return normalizedValue;
+          })
+          .filter((value) => BOSS_AFTER_IMAGE_OPTIONS.includes(value));
+
+        if (!normalized.length && Array.isArray(rawValue) && rawValue.length === 0) {
+          return [];
+        }
+
+        if (!normalized.length) {
+          const fallbackValues = Array.isArray(fallback)
+            ? fallback
+            : [fallback];
+          return fallbackValues
+            .map((value) => String(value || "").trim().toLowerCase())
+            .filter((value) => BOSS_AFTER_IMAGE_OPTIONS.includes(value));
+        }
+
+        return normalized;
+      }
+
+      function getBossAfterImageModes(source = state) {
+        return normalizeBossAfterImageModes(source?.bossAfterImageModes ?? source?.bossAfterImageMode, ["bruta"]);
+      }
+
+      function getBossAfterImageColor(source = state) {
+        return source?.bossAfterImageColor || "#ff4d4d";
+      }
+
+      function createCharacter(name, index, id = index + 1) {
+        return {
+          id,
+          name,
+          imageDataUrl: createAvatarDataUrl(name, index),
+          vitality: 70 + ((index * 11) % 25),
+          vitalityMax: 100,
+          lucidity: 55 + ((index * 7) % 35),
+          lucidityMax: 100,
+          emojiAuraEnabled: false,
+          emojiAuraEmoji: "💥"
+        };
+      }
+
+      const initialCharacters = [createCharacter("Personagem 1", 0)];
+
+      const state = {
+        currentHp: 80,
+        maxHp: 100,
+        color: "#22c55e",
+        label: "HP",
+        textOutlineColor: "#111827",
+        displayMode: "values",
+        imageDataUrl: "",
+        damageEmoji: "💥",
+        damageEffect: null,
+        characters: initialCharacters,
+        bossMovement: "none",
+        bossAfterImageMode: "none",
+        bossAfterImageModes: ["bruta"],
+        bossAfterImageColor: "#ff4d4d"
+      };
+
+      const healthLabel = document.getElementById("healthLabel");
+      const healthText = document.getElementById("healthText");
+      const healthFill = document.getElementById("healthFill");
+      const healthBar = document.querySelector(".health-bar");
+      const healthValueRow = document.getElementById("healthValueRow");
+      const displayImageWrapper = document.getElementById("displayImageWrapper");
+      const bossImageStage = document.getElementById("bossImageStage");
+      const displayImage = document.getElementById("displayImage");
+      const damageBurstLayer = document.getElementById("damageBurstLayer");
+      const displayLeftColumn = document.getElementById("displayLeftColumn");
+      const displayRightColumn = document.getElementById("displayRightColumn");
+
+      function clampCurrent() {
+        state.currentHp = Math.max(0, Math.min(state.currentHp, state.maxHp));
+      }
+
+      function getPercentValue(currentValue, maxValue) {
+        const value = Number(currentValue) || 0;
+        const max = Number(maxValue) || 0;
+        if (max <= 0) {
+          return 0;
+        }
+
+        return Math.max(0, Math.min(100, (value / max) * 100));
+      }
+
+      function createAvatarDataUrl(name, index) {
+        const colors = ["#2563eb", "#f59e0b", "#ec4899", "#14b8a6", "#a855f7", "#ef4444", "#10b981", "#0ea5e9", "#f97316", "#8b5cf6"];
+        const color = colors[index % colors.length];
+        const accent = colors[(index + 3) % colors.length];
+        const initial = (name || `P${index + 1}`).trim().charAt(0).toUpperCase();
+        const svg = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+            <rect width="96" height="96" rx="20" fill="${color}" />
+            <circle cx="48" cy="34" r="18" fill="${accent}" opacity="0.95" />
+            <path d="M16 82c6-15 15-24 32-24s26 9 32 24" fill="${accent}" opacity="0.92" />
+            <text x="48" y="86" text-anchor="middle" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="white">${initial}</text>
+          </svg>`;
+        return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+      }
+
+      function getOppositeColor(color) {
+        const cleanColor = (color || "#22c55e").replace("#", "");
+        const hex = cleanColor.length === 3
+          ? cleanColor.split("").map((char) => char + char).join("")
+          : cleanColor;
+
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+
+        const opposite = [255 - r, 255 - g, 255 - b]
+          .map((channel) => Math.max(0, Math.min(255, channel)))
+          .map((channel) => channel.toString(16).padStart(2, "0"))
+          .join("");
+
+        return `#${opposite}`;
+      }
+
+      function hexToRgba(hex, alpha) {
+        const cleanHex = (hex || "#60a5fa").replace("#", "");
+        const normalized = cleanHex.length === 3
+          ? cleanHex.split("").map((char) => char + char).join("")
+          : cleanHex;
+        const r = parseInt(normalized.slice(0, 2), 16);
+        const g = parseInt(normalized.slice(2, 4), 16);
+        const b = parseInt(normalized.slice(4, 6), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+
+      function getEmojiDominantColor(emoji) {
+        return EMOJI_DOMINANT_COLORS[emoji] || "#60a5fa";
+      }
+
+      function setSlotTint(slot, color) {
+        if (!slot) {
+          return;
+        }
+
+        const tint = hexToRgba(color || "#60a5fa", 0.1);
+        slot.style.setProperty("--emoji-tint", tint);
+      }
+
+      function clearSlotTint(slot) {
+        if (!slot) {
+          return;
+        }
+
+        slot.style.removeProperty("--emoji-tint");
+      }
+
+      function showDamageBurst(emoji) {
+        if (!emoji || !damageBurstLayer) {
+          return;
+        }
+
+        const burst = document.createElement("div");
+        burst.className = "damage-burst-emoji";
+        burst.textContent = emoji;
+        burst.style.setProperty("--burst-x", `${(Math.random() * 140 - 70).toFixed(2)}px`);
+        burst.style.setProperty("--burst-y", `${(Math.random() * 110 - 55).toFixed(2)}px`);
+        damageBurstLayer.appendChild(burst);
+
+        window.setTimeout(() => {
+          burst.remove();
+        }, 900);
+      }
+
+      function showDamageNumber(damage, effectId = null) {
+        if (!Number.isFinite(damage) || damage <= 0 || !damageBurstLayer) {
+          return;
+        }
+
+        const shouldShow = state.displayMode === "values" || state.displayMode === "damage";
+        if (!shouldShow) {
+          return;
+        }
+
+        const numberKey = effectId ?? `damage-${Date.now()}-${Math.random()}`;
+        if (activeDamageNumberEffects.has(numberKey)) {
+          return;
+        }
+
+        activeDamageNumberEffects.add(numberKey);
+
+        const burst = document.createElement("div");
+        burst.className = "damage-burst-number";
+        burst.textContent = `${damage}`;
+        burst.style.setProperty("--burst-x", `${(Math.random() * 90 - 45).toFixed(2)}px`);
+        burst.style.setProperty("--burst-y", `${(Math.random() * 70 - 35).toFixed(2)}px`);
+        damageBurstLayer.appendChild(burst);
+
+        window.setTimeout(() => {
+          burst.remove();
+          activeDamageNumberEffects.delete(numberKey);
+        }, 1400);
+      }
+
+      function triggerDamageEffects(damage, emoji, effectId = null) {
+        if (!damage || !displayImageWrapper) {
+          return;
+        }
+
+        if (state.displayMode === "values" || state.displayMode === "damage") {
+          showDamageNumber(damage, effectId);
+        }
+
+        if (emoji) {
+          showDamageBurst(emoji);
+        }
+
+        const extraBurstCount = Math.min(2, Math.floor(damage / 25));
+        for (let index = 0; index < extraBurstCount; index += 1) {
+          window.setTimeout(() => {
+            showDamageBurst(emoji);
+          }, index * 70);
+        }
+
+        const damageLevel = Math.max(1, Math.floor(damage / 50) + 1);
+        const shakeAmplitude = Math.min(12, 2.4 + damageLevel * 1.05);
+        const flashIntensity = Math.min(5.1, 3.6 + damageLevel * 0.24);
+
+        if (displayImage) {
+          displayImage.classList.remove("damage-flash");
+          void displayImage.offsetWidth;
+          displayImage.classList.add("damage-flash");
+          displayImage.style.setProperty("--shake-x", `${(Math.random() * shakeAmplitude - shakeAmplitude / 2).toFixed(2)}px`);
+          displayImage.style.setProperty("--shake-y", `${(Math.random() * shakeAmplitude - shakeAmplitude / 2).toFixed(2)}px`);
+          displayImage.style.setProperty("--flash-intensity", flashIntensity.toFixed(2));
+          displayImage.classList.remove("damage-shake");
+          void displayImage.offsetWidth;
+          displayImage.classList.add("damage-shake");
+        }
+
+        if (healthFill) {
+          healthFill.classList.remove("damage-flash-bar");
+          void healthFill.offsetWidth;
+          healthFill.style.setProperty("--flash-intensity", flashIntensity.toFixed(2));
+          healthFill.classList.add("damage-flash-bar");
+        }
+      }
+
+      function getTurnEntries() {
+        const baseEntries = state.characters.map((character, index) => ({
+          id: `character-${character.id ?? index + 1}`,
+          type: "character",
+          name: character.name || `Personagem ${index + 1}`,
+          characterIndex: index
+        }));
+        const bossEntry = {
+          id: "boss",
+          type: "boss",
+          name: state.bossName || "Boss",
+          characterIndex: null
+        };
+
+        const allEntries = [...baseEntries, bossEntry];
+        const orderedEntries = [];
+        const seenIds = new Set();
+
+        (Array.isArray(state.turnOrder) ? state.turnOrder : []).forEach((entry) => {
+          const match = allEntries.find((candidate) => candidate.id === entry.id);
+          if (match && !seenIds.has(match.id)) {
+            orderedEntries.push(match);
+            seenIds.add(match.id);
+          }
+        });
+
+        allEntries.forEach((entry) => {
+          if (!seenIds.has(entry.id)) {
+            orderedEntries.push(entry);
+            seenIds.add(entry.id);
+          }
+        });
+
+        return orderedEntries;
+      }
+
+      function getActiveTurnEntry() {
+        const entries = getTurnEntries();
+        if (!entries.length) {
+          return null;
+        }
+
+        const safeIndex = Number.isInteger(state.activeTurnIndex)
+          ? ((state.activeTurnIndex % entries.length) + entries.length) % entries.length
+          : 0;
+
+        return entries[safeIndex] || null;
+      }
+
+      function emitRandomCharacterAura() {
+        const eligibleCharacters = state.characters
+          .map((character, index) => ({ character, index }))
+          .filter(({ character }) => Boolean(character?.emojiAuraEnabled) && Boolean(character?.emojiAuraEmoji));
+
+        if (!eligibleCharacters.length) {
+          return;
+        }
+
+        const randomEntry = eligibleCharacters[Math.floor(Math.random() * eligibleCharacters.length)];
+        const { character, index } = randomEntry;
+        const slot = document.querySelector(`.display-character-slot[data-character-index="${index}"]`);
+        if (!slot) {
+          return;
+        }
+
+        const rect = slot.getBoundingClientRect();
+        const x = rect.left + rect.width * (0.3 + Math.random() * 0.4);
+        const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
+        const bubble = document.createElement("div");
+        bubble.className = "character-emoji-burst";
+        bubble.textContent = character.emojiAuraEmoji;
+        bubble.style.left = `${x}px`;
+        bubble.style.top = `${y}px`;
+        bubble.style.setProperty("--burst-x", `${(Math.random() * 80 - 40).toFixed(2)}px`);
+        bubble.style.setProperty("--burst-y", `${(Math.random() * 70 - 35).toFixed(2)}px`);
+        document.body.appendChild(bubble);
+
+        window.setTimeout(() => bubble.remove(), 1400);
+        const tintColor = getEmojiDominantColor(character.emojiAuraEmoji);
+        setSlotTint(slot, tintColor);
+        if (emojiTintTimeoutId) {
+          window.clearTimeout(emojiTintTimeoutId);
+        }
+        emojiTintTimeoutId = window.setTimeout(() => clearSlotTint(slot), 1200);
+      }
+
+      function startCharacterEmojiLoop() {
+        if (emojiAuraLoopId) {
+          window.clearInterval(emojiAuraLoopId);
+        }
+        if (emojiAuraLoopId3) {
+          window.clearInterval(emojiAuraLoopId3);
+        }
+        if (emojiAuraLoopId5) {
+          window.clearInterval(emojiAuraLoopId5);
+        }
+
+        const hasEligibleCharacters = state.characters.some((character) => Boolean(character?.emojiAuraEnabled) && Boolean(character?.emojiAuraEmoji));
+        if (!hasEligibleCharacters) {
+          return;
+        }
+
+        emojiAuraLoopId = window.setInterval(emitRandomCharacterAura, 4000);
+        emojiAuraLoopId3 = window.setInterval(emitRandomCharacterAura, 3000);
+        emojiAuraLoopId5 = window.setInterval(emitRandomCharacterAura, 5000);
+      }
+
+      function createBossAfterImage() {
+        if (!bossImageStage || !displayImage || !displayImageWrapper || !displayImage.src || displayImageWrapper.hidden) {
+          return;
+        }
+
+        const modes = getBossAfterImageModes();
+        if (!modes.length) {
+          return;
+        }
+
+        const trail = document.createElement("div");
+        trail.className = "boss-after-image";
+        const trailImage = document.createElement("img");
+        trailImage.src = displayImage.src;
+        trailImage.alt = "";
+        const trailOverlay = document.createElement("div");
+        trailOverlay.className = "boss-after-image-overlay";
+        const stageRect = bossImageStage.getBoundingClientRect();
+        const imageRect = displayImage.getBoundingClientRect();
+        const trailWidth = Math.max(60, Math.round(imageRect.width || stageRect.width || 180));
+        const trailHeight = Math.max(60, Math.round(imageRect.height || stageRect.height || 180));
+        trail.style.width = `${trailWidth}px`;
+        trail.style.height = `${trailHeight}px`;
+        trail.appendChild(trailImage);
+        trail.appendChild(trailOverlay);
+        const isDevanecida = modes.includes("devanecida");
+        const isLeve = modes.includes("leve");
+        const isForte = modes.includes("forte");
+        const isColorida = modes.includes("colorida");
+        const isRainbow = modes.includes("arco-íris");
+        const trailDuration = isDevanecida ? "1800ms" : isForte ? "2800ms" : isLeve ? "1400ms" : "1750ms";
+        const trailOpacity = isForte ? "0.62" : isLeve ? "0.28" : isDevanecida ? "0.42" : "0.58";
+        const trailColor = getBossAfterImageColor();
+        trail.style.setProperty("--trail-opacity", trailOpacity);
+        trail.style.setProperty("--trail-duration", trailDuration);
+        trail.style.setProperty("--trail-color", trailColor);
+
+        const overlayBackground = isRainbow
+          ? "conic-gradient(from 0deg, #ff4d4d, #ff9f1c, #fde68a, #22c55e, #38bdf8, #818cf8, #a855f7, #ff4d4d)"
+          : isColorida
+            ? `${trailColor}33`
+            : "transparent";
+        const overlayOpacity = isColorida || isRainbow ? "0.55" : "0";
+        const overlayBlend = isRainbow ? "screen" : "normal";
+        trailOverlay.style.setProperty("--trail-overlay-background", overlayBackground);
+        trailOverlay.style.setProperty("--trail-overlay-opacity", overlayOpacity);
+        trailOverlay.style.setProperty("--trail-overlay-blend", overlayBlend);
+        trailOverlay.style.setProperty("--trail-overlay-filter", isRainbow ? "saturate(1.2)" : "none");
+
+        const animations = [`boss-after-image-trail ${trailDuration} ease-out forwards`];
+        trail.style.animation = animations.join(", ");
+
+        const overlayAnimations = [];
+        if (isRainbow) {
+          overlayAnimations.push("boss-after-image-rainbow 1100ms linear infinite");
+        }
+        trailOverlay.style.animation = overlayAnimations.length ? overlayAnimations.join(", ") : "none";
+
+        const transform = bossImageStage.style.transform || "";
+        const translateMatch = transform.match(/translate\(([-\d.]+)px,\s*([-.\d]+)px\)/);
+        const rotationMatch = transform.match(/rotate\(([-\d.]+)deg\)/);
+        const scaleMatch = transform.match(/scale\(([-\d.]+)\)/);
+        const offsetX = translateMatch ? Number(translateMatch[1]) : 0;
+        const offsetY = translateMatch ? Number(translateMatch[2]) : 0;
+        const rotation = rotationMatch ? Number(rotationMatch[1]) : 0;
+        const scale = scaleMatch ? Number(scaleMatch[1]) : 1;
+
+        trail.style.setProperty("--trail-offset-x", `${(offsetX * 0.35 - 18).toFixed(2)}px`);
+        trail.style.setProperty("--trail-offset-y", `${(offsetY * 0.35 + 7).toFixed(2)}px`);
+        trail.style.setProperty("--trail-rotation", `${rotation.toFixed(2)}deg`);
+        trail.style.setProperty("--trail-scale", `${Math.max(0.8, scale * 0.94).toFixed(2)}`);
+
+        bossImageStage.appendChild(trail);
+        window.setTimeout(() => trail.remove(), 1800);
+      }
+
+      function stopBossMovementAnimation() {
+        if (bossAfterImageIntervalId) {
+          window.clearInterval(bossAfterImageIntervalId);
+          bossAfterImageIntervalId = null;
+        }
+        if (bossMovementAnimationFrame) {
+          window.cancelAnimationFrame(bossMovementAnimationFrame);
+          bossMovementAnimationFrame = null;
+        }
+        bossMovementLastTimestamp = 0;
+        bossMovementBuggedCurrentX = 0;
+        bossMovementBuggedCurrentY = 0;
+        bossMovementBuggedTargetX = 0;
+        bossMovementBuggedTargetY = 0;
+        bossMovementBuggedTimer = 0;
+        bossMovementScaleCurrent = 1;
+        bossMovementScaleTarget = 1;
+        bossMovementScaleTimer = 0;
+        if (bossImageStage) {
+          bossImageStage.style.transform = "translate(0px, 0px) rotate(0deg) scale(1)";
+        }
+      }
+
+      function syncBossMovementAnimation() {
+        if (!bossImageStage || !displayImageWrapper) {
+          return;
+        }
+
+        const mode = state.bossMovement || "none";
+        const afterImageModes = getBossAfterImageModes();
+        const hasAfterImages = afterImageModes.length > 0;
+        displayImageWrapper.dataset.bossMovement = mode;
+
+        if (mode === "none" && !hasAfterImages) {
+          stopBossMovementAnimation();
+          return;
+        }
+
+        if (bossAfterImageIntervalId) window.clearInterval(bossAfterImageIntervalId);
+        if (hasAfterImages) {
+          const cooldown = afterImageModes.includes("forte") ? 55 : afterImageModes.includes("leve") ? 95 : afterImageModes.includes("devanecida") ? 70 : 80;
+          bossAfterImageIntervalId = window.setInterval(() => {
+            if (!displayImageWrapper.hidden && state.imageDataUrl) createBossAfterImage();
+          }, cooldown);
+        }
+
+        if (bossMovementAnimationFrame) {
+          window.cancelAnimationFrame(bossMovementAnimationFrame);
+        }
+
+        bossMovementLastTimestamp = 0;
+        bossMovementBuggedCurrentX = 0;
+        bossMovementBuggedCurrentY = 0;
+        bossMovementBuggedTargetX = 0;
+        bossMovementBuggedTargetY = 0;
+        bossMovementBuggedTimer = 0;
+        bossMovementScaleCurrent = 1;
+        bossMovementScaleTarget = 1;
+        bossMovementScaleTimer = 0;
+
+        if (mode === "none") return;
+
+        const animate = (timestamp) => {
+          if (!bossImageStage || !displayImageWrapper || displayImageWrapper.hidden) {
+            stopBossMovementAnimation();
+            return;
+          }
+
+          if (state.bossMovement !== mode) {
+            syncBossMovementAnimation();
+            return;
+          }
+
+          if (!bossMovementLastTimestamp) {
+            bossMovementLastTimestamp = timestamp;
+          }
+
+          const delta = timestamp - bossMovementLastTimestamp;
+          bossMovementLastTimestamp = timestamp;
+
+          if (mode === "rotating") {
+            const angle = timestamp / 1600;
+            const radius = 14;
+            const x = Math.sin(angle) * radius;
+            const y = Math.cos(angle) * radius * 0.7;
+            const rotation = Math.sin(angle * 0.9) * 5;
+            bossImageStage.style.transform = `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) rotate(${rotation.toFixed(2)}deg) scale(1)`;
+          } else if (mode === "lateral") {
+            const x = Math.sin(timestamp / 1850) * 28;
+            const y = Math.sin(timestamp / 1500) * 6;
+            const curveFactor = 1 - Math.min(1, Math.abs(x) / 28);
+            const easedScale = 0.985 + Math.pow(curveFactor, 3.2) * 0.015;
+            bossImageStage.style.transform = `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) rotate(${(y * 0.08).toFixed(2)}deg) scale(${easedScale.toFixed(3)})`;
+          } else if (mode === "bugged") {
+            bossMovementBuggedTimer += delta;
+            if (bossMovementBuggedTimer >= 650) {
+              bossMovementBuggedTimer = 0;
+              bossMovementBuggedTargetX = (Math.random() * 2 - 1) * 22;
+              bossMovementBuggedTargetY = (Math.random() * 2 - 1) * 16;
+              bossMovementScaleTarget = 0.92 + Math.random() * 0.1;
+            }
+
+            bossMovementBuggedCurrentX += (bossMovementBuggedTargetX - bossMovementBuggedCurrentX) * 0.07;
+            bossMovementBuggedCurrentY += (bossMovementBuggedTargetY - bossMovementBuggedCurrentY) * 0.07;
+            bossMovementScaleCurrent += (bossMovementScaleTarget - bossMovementScaleCurrent) * 0.05;
+            const curveOffsetX = Math.sin(timestamp / 880) * 6;
+            const curveOffsetY = Math.cos(timestamp / 1020) * 5;
+            const rotation = (bossMovementBuggedCurrentX + bossMovementBuggedCurrentY + curveOffsetX + curveOffsetY) * 0.04;
+            bossImageStage.style.transform = `translate(${(bossMovementBuggedCurrentX + curveOffsetX).toFixed(2)}px, ${(bossMovementBuggedCurrentY + curveOffsetY).toFixed(2)}px) rotate(${rotation.toFixed(2)}deg) scale(${bossMovementScaleCurrent.toFixed(2)})`;
+          }
+
+          bossMovementAnimationFrame = window.requestAnimationFrame(animate);
+        };
+
+        bossMovementAnimationFrame = window.requestAnimationFrame(animate);
+      }
+
+      function renderCharacterSlots() {
+        const activeEntry = getActiveTurnEntry();
+        const leftCharacters = state.characters.map((character, index) => ({ character, index })).slice(0, 5);
+        const rightCharacters = state.characters.map((character, index) => ({ character, index })).slice(5);
+
+        const renderColumn = (characters) => characters
+          .map(({ character, index }) => {
+            const vitality = Number(character.vitality ?? character.hp ?? 0);
+            const vitalityMax = Number(character.vitalityMax ?? 100);
+            const lucidity = Number(character.lucidity ?? character.sanity ?? 0);
+            const lucidityMax = Number(character.lucidityMax ?? 100);
+            const vitalityPercent = getPercentValue(vitality, vitalityMax);
+            const lucidityPercent = getPercentValue(lucidity, lucidityMax);
+            const isActive = activeEntry?.type === "character" && activeEntry.characterIndex === index;
+
+            return `
+              <article class="display-character-slot ${isActive ? "is-active" : ""}" data-character-index="${index}">
+                <img src="${character.imageDataUrl || createAvatarDataUrl(character.name, index)}" alt="Avatar de ${character.name}" />
+                <div class="character-slot-body">
+                  <strong class="character-slot-name">${character.name}</strong>
+                  <div class="character-stat">
+                    <span>Vitalidade</span>
+                    <div class="character-bar-track">
+                      <div class="character-bar-fill hp" style="width: ${vitalityPercent}%"></div>
+                    </div>
+                  </div>
+                  <div class="character-stat">
+                    <span>Lucidez</span>
+                    <div class="character-bar-track">
+                      <div class="character-bar-fill sanity" style="width: ${lucidityPercent}%"></div>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            `;
+          })
+          .join("");
+
+        displayLeftColumn.innerHTML = renderColumn(leftCharacters);
+        displayRightColumn.innerHTML = renderColumn(rightCharacters);
+      }
+
+      function render() {
+        clampCurrent();
+        const percent = getPercentValue(state.currentHp, state.maxHp);
+        healthLabel.textContent = state.label;
+        if (state.displayMode === "values") {
+          healthText.textContent = `${state.currentHp} / ${state.maxHp}`;
+        } else if (state.displayMode === "hidden") {
+          healthText.textContent = "";
+        } else {
+          const damage = Math.max(0, state.maxHp - state.currentHp);
+          healthText.textContent = `${damage} Dano`;
+        }
+        const activeEntry = getActiveTurnEntry();
+        const isBossTurn = activeEntry?.type === "boss";
+
+        healthValueRow.hidden = state.displayMode === "hidden";
+        healthFill.style.width = `${percent}%`;
+        healthFill.style.height = "100%";
+        healthFill.style.background = state.color;
+        healthBar.classList.toggle("is-boss-turn", isBossTurn);
+        healthBar.style.setProperty("--health-bar-color", state.color);
+        healthBar.style.setProperty("--health-outline-color", state.textOutlineColor || getOppositeColor(state.color));
+
+        if (state.imageDataUrl) {
+          displayImage.src = state.imageDataUrl;
+          displayImage.alt = "Imagem enviada para a tela";
+          displayImageWrapper.hidden = false;
+          syncBossMovementAnimation();
+          if (getBossAfterImageModes().length && !displayImageWrapper.querySelector(".boss-after-image")) {
+            createBossAfterImage();
+          }
+        } else {
+          displayImage.removeAttribute("src");
+          displayImageWrapper.hidden = true;
+          stopBossMovementAnimation();
+        }
+
+        displayImageWrapper.classList.toggle("is-boss-turn", isBossTurn);
+
+        if (state.damageEffect?.emoji) {
+          const damage = Number(state.damageEffect.damage || 0) || 0;
+          triggerDamageEffects(damage, state.damageEffect.emoji, state.damageEffect.id);
+          state.damageEffect = null;
+        }
+
+        renderCharacterSlots();
+        startCharacterEmojiLoop();
+      }
+
+      function applyState(nextState) {
+        Object.assign(state, nextState);
+        clampCurrent();
+        render();
+      }
+
+      function applyIntegratedState(nextState) {
+        if (!nextState || typeof nextState !== "object") return;
+        if (nextState.health) applyState(nextState.health);
+        window.StonePlateDisplayMap?.update(nextState);
+      }
+
+      function applyQueryState() {
+        const params = new URLSearchParams(window.location.search);
+        if (!params.has("currentHp") && !params.has("characters") && !params.has("turnOrder")) {
+          return false;
+        }
+
+        const nextState = {
+          currentHp: Number(params.get("currentHp") || state.currentHp || 0),
+          maxHp: Number(params.get("maxHp") || state.maxHp || 100),
+          color: params.get("color") || state.color || "#22c55e",
+          label: params.get("label") || state.label || "HP",
+          textOutlineColor: params.get("textOutlineColor") || state.textOutlineColor || "#111827",
+          displayMode: params.get("displayMode") || state.displayMode || "values",
+          imageDataUrl: params.get("imageDataUrl") || state.imageDataUrl || "",
+          bossName: params.get("bossName") || state.bossName || "Boss",
+          bossMovement: params.get("bossMovement") || state.bossMovement || "none",
+          bossAfterImageMode: params.get("bossAfterImageMode") || state.bossAfterImageMode || "none",
+          bossAfterImageModes: params.get("bossAfterImageModes")
+            ? JSON.parse(params.get("bossAfterImageModes"))
+            : normalizeBossAfterImageModes(state.bossAfterImageModes ?? state.bossAfterImageMode, ["bruta"]),
+          bossAfterImageColor: params.get("bossAfterImageColor") || state.bossAfterImageColor || "#ff4d4d",
+          activeTurnIndex: Number(params.get("activeTurnIndex") ?? state.activeTurnIndex ?? 0),
+          turnOrder: params.get("turnOrder") ? JSON.parse(params.get("turnOrder")) : state.turnOrder || []
+        };
+
+        if (params.has("characters")) {
+          try {
+            nextState.characters = JSON.parse(params.get("characters"));
+          } catch (error) {
+            nextState.characters = state.characters;
+          }
+        }
+
+        applyState(nextState);
+        return true;
+      }
+
+      function tryLoadState(attempt = 0) {
+        const saved = localStorage.getItem(storageKey);
+        if (saved) {
+          const integrated = JSON.parse(saved);
+          applyIntegratedState(integrated);
+          return;
+        }
+
+        const legacyHealth = localStorage.getItem("health-state");
+        if (legacyHealth) {
+          applyState(JSON.parse(legacyHealth));
+          return;
+        }
+
+        if (attempt < 8) {
+          window.setTimeout(() => tryLoadState(attempt + 1), 150);
+          return;
+        }
+
+        render();
+      }
+
+      if (broadcastChannel) {
+        broadcastChannel.addEventListener("message", (event) => {
+          if (event.data?.type === "state") applyIntegratedState(event.data.state);
+        });
+      }
+
+      window.addEventListener("storage", (event) => {
+        if ((event.key === storageKey || event.key === "talus-board-v1") && event.newValue) {
+          applyIntegratedState(JSON.parse(event.newValue));
+        }
+      });
+
+      document.querySelectorAll("[data-player-view]").forEach((button) => button.addEventListener("click", () => {
+        const showMap = button.dataset.playerView === "map";
+        document.getElementById("playerMapPanel").hidden = !showMap;
+        document.getElementById("playerCharactersPanel").hidden = showMap;
+        document.querySelectorAll("[data-player-view]").forEach((viewButton) => {
+          const active = viewButton === button;
+          viewButton.classList.toggle("active", active);
+          viewButton.setAttribute("aria-pressed", String(active));
+        });
+        if (showMap) window.StonePlateDisplayMap?.resize();
+      }));
+
+      if (!applyQueryState()) {
+        tryLoadState();
+      }
+    </script>
+  </body>
+</html>
