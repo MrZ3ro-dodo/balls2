@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171a19">
+  <title>Talus — mesa virtual</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Talus, início">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-name">talus<span>.</span></span>
+        <span class="brand-divider"></span>
+        <span class="room-title">MESA DE JOGO</span>
+      </a>
+      <div class="room-controls">
+        <span class="connection-indicator" id="connectionIndicator"><i></i><span id="connectionLabel">Local</span></span>
+        <label class="sr-only" for="roomCode">Código da sala</label>
+        <input id="roomCode" class="room-input" type="text" maxlength="24" placeholder="código da sala" autocomplete="off">
+        <button class="button button-secondary" id="joinRoomButton" type="button">Entrar</button>
+        <button class="button button-primary" id="createRoomButton" type="button"><span aria-hidden="true">＋</span> Criar sala</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="tool-rail" aria-label="Ferramentas do mapa">
+        <div class="rail-section-label">FERRAMENTAS</div>
+        <button class="tool-button active" data-tool="select" type="button" title="Selecionar e mover (V)" aria-label="Selecionar e mover">
+          <span class="tool-glyph cursor-glyph" aria-hidden="true">↖</span><span>Selecionar</span><kbd>V</kbd>
+        </button>
+        <button class="tool-button" data-tool="token" type="button" title="Adicionar token (T)" aria-label="Adicionar token">
+          <span class="tool-glyph token-glyph" aria-hidden="true"><i></i></span><span>Token</span><kbd>T</kbd>
+        </button>
+        <button class="tool-button" data-tool="locate" type="button" title="Localizar token (P)" aria-label="Localizar token">
+          <span class="tool-glyph" aria-hidden="true">⌖</span><span>Localizar</span><kbd>P</kbd>
+        </button>
+        <button class="tool-button" data-tool="projectile" type="button" title="Disparar projétil (J)" aria-label="Disparar projétil">
+          <span class="tool-glyph" aria-hidden="true">➤</span><span>Projétil</span><kbd>J</kbd>
+        </button>
+        <button class="tool-button" data-tool="tile" type="button" title="Pintar tile (B)" aria-label="Pintar tile">
+          <span class="tool-glyph tile-glyph" aria-hidden="true">▦</span><span>Tiles</span><kbd>B</kbd>
+        </button>
+        <div class="tool-separator"></div>
+        <button class="tool-button" data-tool="line" type="button" title="Traço livre (L)" aria-label="Traço livre">
+          <span class="tool-glyph" aria-hidden="true">／</span><span>Traço</span><kbd>L</kbd>
+        </button>
+        <button class="tool-button" data-tool="straight-line" type="button" title="Clique em dois pontos para traçar uma linha reta (R)" aria-label="Linha reta">
+          <span class="tool-glyph" aria-hidden="true">─</span><span>Linha reta</span><kbd>R</kbd>
+        </button>
+        <button class="tool-button" data-tool="circle" type="button" title="Desenhar círculo (C)" aria-label="Desenhar círculo">
+          <span class="tool-glyph circle-glyph" aria-hidden="true"></span><span>Círculo</span><kbd>C</kbd>
+        </button>
+        <button class="tool-button" data-tool="square" type="button" title="Desenhar quadrado (Q)" aria-label="Desenhar quadrado">
+          <span class="tool-glyph square-glyph" aria-hidden="true"></span><span>Quadrado</span><kbd>Q</kbd>
+        </button>
+        <div class="rail-bottom">
+          <button class="tool-button subtle-tool" id="clearButton" type="button" title="Limpar mapa" aria-label="Limpar mapa">
+            <span class="tool-glyph" aria-hidden="true">⌫</span><span>Limpar</span>
+          </button>
+          <button class="tool-button subtle-tool" id="exportButton" type="button" title="Exportar mapa" aria-label="Exportar mapa">
+            <span class="tool-glyph" aria-hidden="true">⇩</span><span>Exportar</span>
+          </button>
+          <input id="importFile" type="file" accept="application/json,.json" hidden>
+          <button class="tool-button subtle-tool" id="importButton" type="button" title="Importar mapa" aria-label="Importar mapa">
+            <span class="tool-glyph" aria-hidden="true">⇧</span><span>Importar</span>
+          </button>
+        </div>
+      </aside>
+
+      <section class="board-area" aria-label="Tabuleiro">
+        <div class="board-topline">
+          <div class="board-heading">
+            <span class="eyebrow">TABULEIRO</span>
+            <span class="board-title" id="boardTitle">Encontro sem título</span>
+          </div>
+          <div class="board-actions">
+            <button class="icon-button" id="gridToggle" type="button" aria-label="Alternar grade" title="Alternar grade"><span class="grid-icon" aria-hidden="true">▦</span></button>
+            <button class="icon-button" id="shareButton" type="button" aria-label="Copiar código da sala" title="Copiar código da sala"><span aria-hidden="true">⤴</span></button>
+          </div>
+        </div>
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="boardCanvas" aria-label="Área interativa do mapa"></canvas>
+          <div class="canvas-hint" id="canvasHint">Escolha uma ferramenta e clique no mapa para começar.</div>
+          <div class="map-coordinates" id="coordinates">X 000 · Y 000</div>
+        </div>
+        <footer class="board-footer">
+          <div class="footer-status"><span class="status-dot"></span><span id="objectCount">0 objetos no mapa</span></div>
+          <div class="zoom-controls">
+            <button class="zoom-button" id="zoomOut" type="button" aria-label="Diminuir zoom">−</button>
+            <button class="zoom-readout" id="zoomReadout" type="button" title="Redefinir zoom">100%</button>
+            <button class="zoom-button" id="zoomIn" type="button" aria-label="Aumentar zoom">＋</button>
+            <span class="zoom-divider"></span><span class="pan-hint">ESPAÇO + ARRASTAR PARA MOVER</span>
+          </div>
+        </footer>
+      </section>
+
+      <aside class="inspector" aria-label="Opções e jogadores">
+        <section class="inspector-section tool-options">
+          <div class="section-heading"><span>FERRAMENTA</span><span class="section-rule"></span></div>
+          <div class="opacity-control">
+            <label class="field-label" for="objectOpacity">OPACIDADE <span id="objectOpacityValue">65%</span></label>
+            <input id="objectOpacity" class="range-control" type="range" min="20" max="100" value="65">
+          </div>
+          <div id="selectionOptions" class="empty-selection">
+            <span class="selection-mark" aria-hidden="true">↖</span>
+            <p>Arraste o token ou clique nele<br>e depois no destino.</p>
+          </div>
+          <div id="locateOptions" class="field-note" hidden>Clique em um token para centrar o mapa e destacar sua posição.</div>
+          <div id="projectileOptions" class="options-content" hidden>
+            <label class="field-label" for="projectileType">TIPO DE PROJÉTIL</label>
+            <select id="projectileType" class="text-input">
+              <option value="arrow">Flecha</option>
+              <option value="fire">Fogo</option>
+              <option value="arcane">Arcano</option>
+            </select>
+            <p class="field-note">Clique na origem e depois no destino para disparar.</p>
+          </div>
+          <div id="colorOptions" class="options-content" hidden>
+            <label class="field-label" for="drawColor">COR DA MARCAÇÃO</label>
+            <div class="color-control"><input id="drawColor" type="color" value="#f4c95d"><span id="drawColorValue">#F4C95D</span></div>
+            <label class="field-label spacing-top" for="lineWidth">ESPESSURA <span id="lineWidthValue">3</span></label>
+            <input id="lineWidth" class="range-control" type="range" min="1" max="10" value="3">
+          </div>
+          <div id="tokenOptions" class="options-content" hidden>
+            <label class="field-label" for="tokenName">NOME DO TOKEN</label>
+            <input id="tokenName" class="text-input" type="text" maxlength="18" value="Herói">
+            <label class="field-label spacing-top" for="tokenColor">COR DO TOKEN</label>
+            <div class="color-control"><input id="tokenColor" type="color" value="#d87054"><span id="tokenColorValue">#D87054</span></div>
+            <p class="field-note">Clique para posicionar. Selecione e use as setas para mover.</p>
+          </div>
+          <div id="tileOptions" class="options-content" hidden>
+            <span class="field-label">TIPO DE TILE</span>
+            <div class="tile-palette" id="tilePalette">
+              <button class="tile-swatch active" data-tile="stone" type="button" aria-label="Pedra" title="Pedra"><i></i></button>
+              <button class="tile-swatch water" data-tile="water" type="button" aria-label="Água" title="Água"><i></i></button>
+              <button class="tile-swatch grass" data-tile="grass" type="button" aria-label="Grama" title="Grama"><i></i></button>
+              <button class="tile-swatch lava" data-tile="lava" type="button" aria-label="Lava" title="Lava"><i></i></button>
+              <button class="tile-swatch wall" data-tile="wall" type="button" aria-label="Parede" title="Parede"><i></i></button>
+              <button class="tile-swatch erase" data-tile="erase" type="button" aria-label="Apagar tile" title="Apagar"></button>
+            </div>
+            <p class="field-note">Clique ou arraste para pintar.</p>
+          </div>
+        </section>
+
+        <section class="inspector-section selected-section" id="selectedSection" hidden>
+          <div class="section-heading"><span>SELECIONADO</span><span class="section-rule"></span></div>
+          <div id="selectedDetails"></div>
+        </section>
+
+        <section class="inspector-section map-section" aria-label="Configurações do mapa">
+          <div class="section-heading"><span>MAPA</span><span class="section-rule"></span></div>
+          <label class="field-label" for="mapShape">FORMATO</label>
+          <select id="mapShape" class="text-input">
+            <option value="rectangle">Retângulo</option>
+            <option value="square">Quadrado</option>
+            <option value="circle">Círculo</option>
+            <option value="triangle">Triângulo</option>
+          </select>
+          <div class="map-dimensions">
+            <label class="field-label" for="mapWidth">LARGURA
+              <input id="mapWidth" class="text-input map-number" type="number" min="1" max="5000" step="1" value="12">
+            </label>
+            <label class="field-label" id="mapHeightField" for="mapHeight">ALTURA
+              <input id="mapHeight" class="text-input map-number" type="number" min="1" max="5000" step="1" value="8">
+            </label>
+          </div>
+          <label class="field-label" id="mapRatioField" for="mapRatio">PROPORÇÃO DO RETÂNGULO</label>
+          <select id="mapRatio" class="text-input">
+            <option value="custom">Personalizada</option>
+            <option value="1:1">1:1</option>
+            <option value="4:3">4:3</option>
+            <option value="16:9">16:9</option>
+            <option value="2:1">2:1</option>
+          </select>
+          <div class="map-capacity" id="mapCapacity">96 / 5.000 tiles</div>
+        </section>
+
+        <section class="inspector-section initiative-section" aria-label="Iniciativa">
+          <div class="section-heading"><span>INICIATIVA</span><span class="initiative-round" id="initiativeRound">RODADA 1</span></div>
+          <div class="initiative-actions">
+            <button class="button button-secondary compact-button" id="addCombatants" type="button">＋ Tokens</button>
+            <button class="button button-secondary compact-button" id="rollInitiative" type="button">Rolar d20</button>
+            <button class="button button-primary compact-button" id="nextTurn" type="button" aria-label="Próximo turno" title="Próximo turno">⏭</button>
+          </div>
+          <div id="initiativeList" class="initiative-list"></div>
+          <p class="field-note" id="initiativeEmpty">Adicione tokens para iniciar a ordem.</p>
+        </section>
+
+        <section class="inspector-section players-section">
+          <div class="section-heading"><span>NA MESA</span><span class="player-count" id="playerCount">1</span></div>
+          <div class="player-row"><span class="avatar avatar-you">V</span><span class="player-name">Você</span><span class="player-role">MESTRE</span><span class="presence-dot"></span></div>
+          <div id="remotePlayers"></div>
+          <div class="invite-note" id="inviteNote">Crie uma sala para convidar outros jogadores.</div>
+        </section>
+
+        <section class="inspector-section legend-section">
+          <div class="section-heading"><span>LEGENDA</span><span class="section-rule"></span></div>
+          <div class="legend-row"><span class="legend-dot legend-token"></span><span>Tokens</span><span class="legend-line"></span></div>
+          <div class="legend-row"><span class="legend-dot legend-tile"></span><span>Tiles</span><span class="legend-line"></span></div>
+          <div class="legend-row"><span class="legend-dot legend-mark"></span><span>Marcações</span><span class="legend-line"></span></div>
+        </section>
+      </aside>
+    </main>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+</body>
+</html>
