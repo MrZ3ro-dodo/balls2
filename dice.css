@@ -71,6 +71,36 @@ body:not(.display-page) .dice-panel { width: min(370px, calc(100vw - 181px)); }
 .rolling-die::before { position: absolute; inset: 3px; clip-path: inherit; border: 1px solid #6f766c; content: ""; }
 .rolling-die span { position: relative; z-index: 1; }
 .rolling-die.is-settled { animation: none; transform: none; }
+.rolling-die.coin-face {
+  clip-path: none;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #f7f5ee, #d8d4c7);
+  box-shadow: inset 0 0 0 1px rgba(64, 70, 62, 0.38), 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+.rolling-die.coin-face::before {
+  inset: 3px;
+  border-radius: 50%;
+  clip-path: none;
+  border: 1px solid rgba(59, 64, 57, 0.6);
+}
+.rolling-die.coin-face span {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+}
+.rolling-die.coin-face svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+}
+.rolling-die.coin-face-heads {
+  background: linear-gradient(145deg, #f9f2cf, #d9a64a);
+}
+.rolling-die.coin-face-tails {
+  background: linear-gradient(145deg, #edf4ff, #9fbfd6);
+}
 @keyframes dice-tumble { 0% { opacity: .2; transform: translate3d(0, -44px, 0) rotate(-280deg) scale(.5); } 65% { opacity: 1; transform: translate3d(0, 5px, 0) rotate(540deg) scale(1.12); } 100% { opacity: 1; transform: translate3d(0, 0, 0) rotate(720deg) scale(1); } }
 @keyframes dice-panel-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes dice-cursor { to { opacity: .25; } }

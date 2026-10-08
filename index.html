@@ -123,7 +123,7 @@
           </div>
           <div id="selectionOptions" class="empty-selection">
             <span class="selection-mark" aria-hidden="true">↖</span>
-            <p>Arraste o token ou clique nele<br>e depois no destino.</p>
+            <p>Arraste em uma área vazia para selecionar vários. Shift adiciona à seleção.</p>
           </div>
           <div id="locateOptions" class="field-note" hidden>Clique em um token para centrar o mapa e destacar sua posição.</div>
           <div id="projectileOptions" class="options-content" hidden>
@@ -180,6 +180,14 @@
             <input id="tokenName" class="text-input" type="text" maxlength="18" value="Herói">
             <label class="field-label spacing-top" for="tokenColor">COR DO TOKEN</label>
             <div class="color-control"><input id="tokenColor" type="color" value="#d87054"><span id="tokenColorValue">#D87054</span></div>
+            <div class="token-size-fields spacing-top">
+              <label class="field-label" for="tokenWidth">LARGURA (TILES)
+                <input id="tokenWidth" class="text-input map-number" type="number" min="1" step="1" value="1">
+              </label>
+              <label class="field-label" for="tokenHeight">ALTURA (TILES)
+                <input id="tokenHeight" class="text-input map-number" type="number" min="1" step="1" value="1">
+              </label>
+            </div>
             <p class="field-note">Clique para posicionar. Selecione e use as setas para mover.</p>
           </div>
           <div id="tileOptions" class="options-content" hidden>

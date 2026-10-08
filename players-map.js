@@ -216,7 +216,12 @@
   }
 
   function drawToken(token, scale) {
-    const radius = Math.max(Number(token.radius) || 22, 14 / scale);
+    const widthTiles = Math.max(1, Math.round(Number(token.widthTiles) || (Number(token.radius) || 22) * 2 / GRID));
+    const heightTiles = Math.max(1, Math.round(Number(token.heightTiles) || (Number(token.radius) || 22) * 2 / GRID));
+    const width = widthTiles * GRID;
+    const height = heightTiles * GRID;
+    const left = token.x - width / 2;
+    const top = token.y - height / 2;
     const label = token.name || "Token";
     const character = mapState.health?.characters?.find(item => String(item.linkedTokenId) === String(token.id));
     let portrait = character?.imageDataUrl ? tokenImageCache.get(character.imageDataUrl) : null;
@@ -230,17 +235,17 @@
     context.save();
     context.globalAlpha = opacityOf(token);
     context.beginPath();
-    context.arc(token.x, token.y, radius, 0, Math.PI * 2);
+    context.rect(left, top, width, height);
     context.fillStyle = token.color || "#d87054";
     context.fill();
     if (portrait) {
       context.save();
       context.clip();
-      context.drawImage(portrait, token.x - radius, token.y - radius, radius * 2, radius * 2);
+      context.drawImage(portrait, left, top, width, height);
       context.restore();
     }
     context.beginPath();
-    context.arc(token.x, token.y, radius, 0, Math.PI * 2);
+    context.rect(left, top, width, height);
     context.lineWidth = 2 / scale;
     context.strokeStyle = "#f0dfca";
     context.stroke();
@@ -248,7 +253,7 @@
       context.fillStyle = "#fff4e9";
       context.textAlign = "center";
       context.textBaseline = "middle";
-      context.font = `700 ${Math.max(10, radius * 0.8)}px Manrope, sans-serif`;
+      context.font = `700 ${Math.max(10, Math.min(width, height) * 0.28)}px Manrope, sans-serif`;
       context.fillText(label.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join("").toUpperCase(), token.x, token.y);
     }
     context.restore();
@@ -258,7 +263,7 @@
     context.textAlign = "center";
     context.textBaseline = "top";
     const labelWidth = context.measureText(label).width;
-    const labelY = token.y + radius + 5 / scale;
+    const labelY = top + height + 5 / scale;
     context.fillStyle = "#171a19e8";
     context.fillRect(token.x - labelWidth / 2 - 5 / scale, labelY, labelWidth + 10 / scale, 18 / scale);
     context.fillStyle = "#e5e7dc";
@@ -266,7 +271,7 @@
 
     const health = token.health;
     if (health && Number(health.vitalityMax) > 0 && Number(health.lucidityMax) > 0) {
-      const barWidth = radius * 1.9;
+      const barWidth = Math.max(8 / scale, width - 8 / scale);
       const barX = token.x - barWidth / 2;
       const barY = labelY + 21 / scale;
       context.fillStyle = "#df8568";
@@ -279,7 +284,7 @@
     if (mapState.initiative?.activeTokenId === token.id) {
       context.save();
       context.beginPath();
-      context.arc(token.x, token.y, radius + 9 / scale, 0, Math.PI * 2);
+      context.rect(left - 9 / scale, top - 9 / scale, width + 18 / scale, height + 18 / scale);
       context.strokeStyle = "#f4c95d";
       context.lineWidth = 2.5 / scale;
       context.stroke();

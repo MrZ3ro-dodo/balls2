@@ -34,7 +34,11 @@
   let magnifierZoom = 3;
   let magnifierFixedZoom = 0.3;
   let magnifierPointer = null;
+  let lastPointerRaw = null;
+  let lastPointerScreen = null;
   let selectedId = null;
+  let selectedIds = new Set();
+  let selectionBox = null;
   let activePointer = null;
   let currentShape = null;
   let currentToken = null;
@@ -204,7 +208,7 @@
       const position = nextCharacterTokenPosition();
       if (!position) { complete = false; break; }
       const token = {
-        id: crypto.randomUUID(), ...position, radius: 22, name: character.name || 'Personagem',
+        id: crypto.randomUUID(), ...position, widthTiles: 1, heightTiles: 1, name: character.name || 'Personagem',
         color: '#d87054', opacity: state.opacity
       };
       character.linkedTokenId = token.id;
@@ -217,7 +221,7 @@
     const position = nextCharacterTokenPosition();
     if (!position) { showToast('Não há espaço livre no mapa para criar o token.'); return false; }
     const token = {
-      id: crypto.randomUUID(), ...position, radius: 22, name: character.name || 'Personagem',
+      id: crypto.randomUUID(), ...position, widthTiles: 1, heightTiles: 1, name: character.name || 'Personagem',
       color: '#d87054', opacity: state.opacity
     };
     character.linkedTokenId = token.id;
@@ -315,6 +319,19 @@
   function pointerPosition(event) {
     const bounds = canvas.getBoundingClientRect();
     return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+  }
+
+  function interactionPointerPosition(event) {
+    const raw = pointerPosition(event);
+    const screen = magnifierMode !== 0 && lastPointerRaw && lastPointerScreen
+      ? {
+          x: lastPointerScreen.x + (raw.x - lastPointerRaw.x) * 0.8,
+          y: lastPointerScreen.y + (raw.y - lastPointerRaw.y) * 0.8
+        }
+      : raw;
+    lastPointerRaw = raw;
+    lastPointerScreen = screen;
+    return screen;
   }
 
   function updateMagnifier() {
@@ -552,7 +569,8 @@
       context.lineWidth = 3 / zoom;
       context.setLineDash([6 / zoom, 3 / zoom]);
       context.beginPath();
-      context.arc(token.x, token.y, (token.radius || 22) + 8 / zoom, 0, Math.PI * 2);
+      const dimensions = tokenDimensions(token);
+      context.rect(token.x - dimensions.width / 2 - 8 / zoom, token.y - dimensions.height / 2 - 8 / zoom, dimensions.width + 16 / zoom, dimensions.height + 16 / zoom);
       context.stroke();
       context.restore();
     }
@@ -681,8 +699,9 @@
     context.strokeStyle = '#f4c95d';
     context.lineWidth = 2 / zoom;
     context.setLineDash([5 / zoom, 3 / zoom]);
+    const dimensions = tokenDimensions(token);
     context.beginPath();
-    context.arc(token.x, token.y, (token.radius || 22) + 12 / zoom, 0, Math.PI * 2);
+    context.rect(token.x - dimensions.width / 2 - 12 / zoom, token.y - dimensions.height / 2 - 12 / zoom, dimensions.width + 24 / zoom, dimensions.height + 24 / zoom);
     context.stroke();
     context.restore();
   }
@@ -717,6 +736,23 @@
     context.lineWidth = 2 / zoom;
     if (state.map.shape === 'circle' || state.map.shape === 'triangle') context.stroke(mapOutlinePath(mapWorldBounds()));
     else context.stroke(boardPath);
+    context.restore();
+    drawSelectionBox();
+  }
+
+  function drawSelectionBox() {
+    if (!selectionBox) return;
+    const left = Math.min(selectionBox.startX, selectionBox.x);
+    const top = Math.min(selectionBox.startY, selectionBox.y);
+    const width = Math.abs(selectionBox.x - selectionBox.startX);
+    const height = Math.abs(selectionBox.y - selectionBox.startY);
+    context.save();
+    context.fillStyle = '#c1d48a22';
+    context.strokeStyle = '#c1d48a';
+    context.lineWidth = 1;
+    context.setLineDash([5, 4]);
+    context.fillRect(left, top, width, height);
+    context.strokeRect(left, top, width, height);
     context.restore();
   }
 
@@ -765,7 +801,7 @@
     context.lineWidth = 1.5 / zoom;
     context.strokeRect(tile.x - half, tile.y - half, GRID, GRID);
     context.restore();
-    if (selectedId === tile.id) drawSelection(tile.x, tile.y, GRID, GRID);
+    if (selectedIds.has(tile.id)) drawSelection(tile.x, tile.y, GRID, GRID);
   }
 
   function drawShape(shape, preview = false) {
@@ -787,7 +823,7 @@
       }
       context.fill();
     }
-    if (selectedId === shape.id && !preview) {
+    if (selectedIds.has(shape.id) && !preview) {
       context.globalAlpha = 1;
       const bounds = shapeBounds(shape);
       drawSelection(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2, bounds.width, bounds.height);
@@ -1001,16 +1037,17 @@
   }
 
   function drawToken(token, preview = false) {
-    const radius = token.radius || 22;
+    const dimensions = tokenDimensions(token);
+    const left = token.x - dimensions.width / 2;
+    const top = token.y - dimensions.height / 2;
+    const inset = Math.min(4 / zoom, dimensions.width / 4, dimensions.height / 4);
     context.save();
     context.shadowColor = '#0009'; context.shadowBlur = 8; context.shadowOffsetY = 3;
-    context.beginPath(); context.arc(token.x, token.y, radius, 0, Math.PI * 2);
-    context.fillStyle = token.color || '#d87054'; context.globalAlpha = opacityOf(token) * (preview ? 0.65 : 1); context.fill(); context.globalAlpha = 1;
+    context.fillStyle = token.color || '#d87054'; context.globalAlpha = opacityOf(token) * (preview ? 0.65 : 1); context.fillRect(left, top, dimensions.width, dimensions.height); context.globalAlpha = 1;
     context.shadowColor = 'transparent'; context.shadowBlur = 0; context.shadowOffsetY = 0;
-    context.lineWidth = 2 / zoom; context.strokeStyle = '#f0dfca'; context.stroke();
-    context.beginPath(); context.arc(token.x, token.y, radius - 4, 0, Math.PI * 2);
-    context.strokeStyle = '#ffffff66'; context.lineWidth = 1 / zoom; context.stroke();
-    context.fillStyle = '#fff4e9'; context.font = `700 ${Math.max(10, radius * 0.8)}px Manrope, sans-serif`;
+    context.lineWidth = 2 / zoom; context.strokeStyle = '#f0dfca'; context.strokeRect(left, top, dimensions.width, dimensions.height);
+    context.strokeStyle = '#ffffff66'; context.lineWidth = 1 / zoom; context.strokeRect(left + inset, top + inset, dimensions.width - inset * 2, dimensions.height - inset * 2);
+    context.fillStyle = '#fff4e9'; context.font = `700 ${Math.max(10, Math.min(dimensions.width, dimensions.height) * 0.28)}px Manrope, sans-serif`;
     context.textAlign = 'center'; context.textBaseline = 'middle';
     context.fillText(initials(token.name), token.x, token.y + 1);
     context.restore();
@@ -1020,13 +1057,14 @@
     const label = token.name || 'Token';
     const labelWidth = context.measureText(label).width;
     context.fillStyle = '#171a19dd';
-    context.fillRect(token.x - labelWidth / 2 - 5 / zoom, token.y + radius + 5 / zoom, labelWidth + 10 / zoom, 18 / zoom);
-    context.fillStyle = '#e5e7dc'; context.fillText(label, token.x, token.y + radius + 8 / zoom);
+    const bottom = top + dimensions.height;
+    context.fillRect(token.x - labelWidth / 2 - 5 / zoom, bottom + 5 / zoom, labelWidth + 10 / zoom, 18 / zoom);
+    context.fillStyle = '#e5e7dc'; context.fillText(label, token.x, bottom + 8 / zoom);
     context.restore();
     if (token.health && token.health.vitalityMax > 0 && token.health.lucidityMax > 0) {
-      const barWidth = radius * 1.9;
+      const barWidth = Math.max(8 / zoom, dimensions.width - 8 / zoom);
       const barX = token.x - barWidth / 2;
-      const barY = token.y + radius + 25 / zoom;
+      const barY = bottom + 25 / zoom;
       context.save();
       context.fillStyle = '#171a19e8';
       context.fillRect(barX - 2 / zoom, barY - 2 / zoom, barWidth + 4 / zoom, 10 / zoom);
@@ -1036,13 +1074,13 @@
       context.fillRect(barX, barY + 4 / zoom, barWidth * Math.max(0, Math.min(1, token.health.lucidity / token.health.lucidityMax)), 3 / zoom);
       context.restore();
     }
-    if (selectedId === token.id) {
+    if (selectedIds.has(token.id)) {
       context.save(); context.setLineDash([4 / zoom, 4 / zoom]); context.strokeStyle = '#c1d48a'; context.lineWidth = 1.5 / zoom;
-      context.beginPath(); context.arc(token.x, token.y, radius + 5 / zoom, 0, Math.PI * 2); context.stroke(); context.restore();
+      context.strokeRect(left - 5 / zoom, top - 5 / zoom, dimensions.width + 10 / zoom, dimensions.height + 10 / zoom); context.restore();
     }
     if (state.initiative?.activeTokenId === token.id) {
       context.save(); context.strokeStyle = '#f4c95d'; context.lineWidth = 2.5 / zoom;
-      context.beginPath(); context.arc(token.x, token.y, radius + 9 / zoom, 0, Math.PI * 2); context.stroke(); context.restore();
+      context.strokeRect(left - 9 / zoom, top - 9 / zoom, dimensions.width + 18 / zoom, dimensions.height + 18 / zoom); context.restore();
     }
   }
 
@@ -1092,6 +1130,19 @@
   }
   function opacityOf(item) { return clampOpacity(item.opacity); }
 
+  function tokenTileCount(value, legacyRadius = 22) {
+    const size = Number(value);
+    if (Number.isFinite(size) && size > 0) return Math.max(1, Math.round(size));
+    return Math.max(1, Math.round((Number(legacyRadius) || 22) * 2 / GRID));
+  }
+
+  function tokenDimensions(token) {
+    return {
+      width: tokenTileCount(token.widthTiles, token.radius) * GRID,
+      height: tokenTileCount(token.heightTiles, token.radius) * GRID
+    };
+  }
+
   function alignStateToGrid(mapState) {
     const coordinate = value => Number.isFinite(Number(value)) ? Number(value) : 0;
     const defaultOpacity = clampOpacity(mapState.opacity);
@@ -1102,7 +1153,7 @@
       opacity: defaultOpacity,
       map: normalizeMapConfig(mapState.map),
       initiative: normalizeInitiative(mapState.initiative, mapState.tokens),
-      tokens: mapState.tokens.map(token => ({ ...token, opacity: clampOpacity(token.opacity, defaultOpacity), x: snapCellCenter(coordinate(token.x)), y: snapCellCenter(coordinate(token.y)) })),
+      tokens: mapState.tokens.map(token => ({ ...token, widthTiles: tokenTileCount(token.widthTiles, token.radius), heightTiles: tokenTileCount(token.heightTiles, token.radius), opacity: clampOpacity(token.opacity, defaultOpacity), x: snapCellCenter(coordinate(token.x)), y: snapCellCenter(coordinate(token.y)) })),
       tiles: mapState.tiles.map(tile => ({ ...tile, opacity: clampOpacity(tile.opacity, defaultOpacity), x: snapCellCenter(coordinate(tile.x)), y: snapCellCenter(coordinate(tile.y)) })),
       shapes: mapState.shapes.map(shape => {
         if (shape.kind === 'stroke') {
@@ -1153,7 +1204,8 @@
   function findToken(point) {
     for (let index = state.tokens.length - 1; index >= 0; index--) {
       const token = state.tokens[index];
-      if (Math.hypot(point.x - token.x, point.y - token.y) <= (token.radius || 22) + 4) return token;
+      const dimensions = tokenDimensions(token);
+      if (Math.abs(point.x - token.x) <= dimensions.width / 2 + 4 && Math.abs(point.y - token.y) <= dimensions.height / 2 + 4) return token;
     }
     const cellX = snapCellCenter(point.x), cellY = snapCellCenter(point.y);
     for (let index = state.tokens.length - 1; index >= 0; index--) {
@@ -1161,6 +1213,30 @@
       if (token.x === cellX && token.y === cellY) return token;
     }
     return null;
+  }
+
+  function setSelection(ids, primaryId = null) {
+    selectedIds = new Set(ids);
+    selectedId = primaryId && selectedIds.has(primaryId) ? primaryId : selectedIds.values().next().value || null;
+  }
+
+  function objectIntersectsSelection(item, bounds) {
+    const itemBounds = state.tokens.includes(item)
+      ? (() => { const dimensions = tokenDimensions(item); return { left: item.x - dimensions.width / 2, right: item.x + dimensions.width / 2, top: item.y - dimensions.height / 2, bottom: item.y + dimensions.height / 2 }; })()
+      : state.tiles.includes(item)
+        ? { left: item.x - GRID / 2, right: item.x + GRID / 2, top: item.y - GRID / 2, bottom: item.y + GRID / 2 }
+        : (() => { const shape = shapeBounds(item); return { left: shape.x, right: shape.x + shape.width, top: shape.y, bottom: shape.y + shape.height }; })();
+    return itemBounds.right >= bounds.left && itemBounds.left <= bounds.right && itemBounds.bottom >= bounds.top && itemBounds.top <= bounds.bottom;
+  }
+
+  function completeBoxSelection() {
+    const start = screenToWorld({ x: selectionBox.startX, y: selectionBox.startY });
+    const end = screenToWorld({ x: selectionBox.x, y: selectionBox.y });
+    const bounds = { left: Math.min(start.x, end.x), right: Math.max(start.x, end.x), top: Math.min(start.y, end.y), bottom: Math.max(start.y, end.y) };
+    const picked = [...state.tokens, ...state.tiles, ...state.shapes].filter(item => objectIntersectsSelection(item, bounds)).map(item => item.id);
+    setSelection(selectionBox.additive ? [...selectedIds, ...picked] : picked);
+    selectionBox = null;
+    render();
   }
 
   function findTile(point) {
@@ -1221,11 +1297,13 @@
   }
 
   function onPointerDown(event) {
+    lastPointerRaw = pointerPosition(event);
+    lastPointerScreen = lastPointerRaw;
     if (canvas.dataset.space === 'true' || event.button === 1 || event.button === 2) {
       startPan(event); return;
     }
     if (event.button !== 0) return;
-    const screen = pointerPosition(event);
+    const screen = lastPointerScreen;
     const point = screenToWorld(screen);
     aimWorld = aimPointFor(point);
     if (!pointInsideMap(point)) return;
@@ -1239,7 +1317,7 @@
       } else {
         const line = { id: crypto.randomUUID(), kind: 'line', x1: pendingLineStart.x, y1: pendingLineStart.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, ...drawingShapeMetadata() };
         state.shapes.push(line);
-        selectedId = line.id;
+        setSelection([line.id], line.id);
         pendingLineStart = null;
         linePreview = null;
         dragReadout = null;
@@ -1257,7 +1335,7 @@
         if (constructionBlocksRoute(token, destination)) { showToast('Uma construção bloqueia essa rota.'); return; }
         token.x = destination.x;
         token.y = destination.y;
-        selectedId = token.id;
+        setSelection([token.id], token.id);
       }
       pendingTokenMove = null;
       movementRoute = null;
@@ -1268,7 +1346,7 @@
     if (tool === 'locate') {
       const token = findToken(point);
       if (token) {
-        selectedId = token.id;
+        setSelection([token.id], token.id);
         locatedTokenId = token.id;
         panX = -token.x * zoom;
         panY = -token.y * zoom;
@@ -1303,7 +1381,7 @@
       const position = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
       if (!pointInsideMap(position)) return;
       if (constructionBlocksPoint(position)) { showToast('Não é possível posicionar um token dentro de uma construção.'); return; }
-      currentToken = { id: crypto.randomUUID(), ...position, radius: 22, name: document.querySelector('#tokenName').value.trim() || 'Token', color: document.querySelector('#tokenColor').value, opacity: state.opacity };
+      currentToken = { id: crypto.randomUUID(), ...position, widthTiles: tokenTileCount(document.querySelector('#tokenWidth').value), heightTiles: tokenTileCount(document.querySelector('#tokenHeight').value), name: document.querySelector('#tokenName').value.trim() || 'Token', color: document.querySelector('#tokenColor').value, opacity: state.opacity };
       dragReadout = { x: screen.x, y: screen.y, startX: point.x, startY: point.y, text: '0 tiles' };
       render(); return;
     }
@@ -1320,7 +1398,11 @@
     }
     const found = findToken(point);
     if (found) {
-      selectedId = found.id;
+      if (event.shiftKey) {
+        const next = new Set(selectedIds);
+        if (next.has(found.id)) next.delete(found.id); else next.add(found.id);
+        setSelection(next, found.id);
+      } else if (!selectedIds.has(found.id)) setSelection([found.id], found.id);
       dragToken = { id: found.id, offsetX: point.x - found.x, offsetY: point.y - found.y, startX: found.x, startY: found.y, didMove: false };
       movementRoute = { start: { x: found.x, y: found.y }, end: { x: found.x, y: found.y } };
       dragReadout = { x: screen.x, y: screen.y, text: '0 tiles' };
@@ -1328,14 +1410,24 @@
     }
     const tile = findTile(point);
     const shape = findShape(point);
-    selectedId = tile?.id || shape?.id || null;
+    const foundObject = tile || shape;
+    if (foundObject) {
+      if (event.shiftKey) setSelection([...selectedIds, foundObject.id], foundObject.id);
+      else setSelection([foundObject.id], foundObject.id);
+    } else {
+      selectionBox = { startX: screen.x, startY: screen.y, x: screen.x, y: screen.y, additive: event.shiftKey };
+      activePointer = event.pointerId;
+      canvas.setPointerCapture(event.pointerId);
+      render();
+      return;
+    }
     if (shape) dragToken = { id: shape.id, offsetX: point.x, offsetY: point.y, x1: shape.x1, y1: shape.y1, x2: shape.x2, y2: shape.y2, points: shape.kind === 'stroke' ? shape.points.map(cell => ({ ...cell })) : null, shape: true };
     if (shape) dragReadout = { x: screen.x, y: screen.y, text: '0 tiles' };
     render();
   }
 
   function onPointerMove(event) {
-    const screen = pointerPosition(event);
+    const screen = interactionPointerPosition(event);
     magnifierPointer = screen;
     const point = screenToWorld(screen);
     aimWorld = aimPointFor(point);
@@ -1344,6 +1436,11 @@
     if (panPointer && panPointer.id === event.pointerId) {
       panX = panPointer.panX + screen.x - panPointer.x;
       panY = panPointer.panY + screen.y - panPointer.y;
+      render(); return;
+    }
+    if (selectionBox && activePointer === event.pointerId) {
+      selectionBox.x = screen.x;
+      selectionBox.y = screen.y;
       render(); return;
     }
     if (!pointInsideMap(point)) { render(); return; }
@@ -1457,6 +1554,7 @@
       currentShape = null;
       currentToken = null;
       dragToken = null;
+      selectionBox = null;
       pendingTokenMove = null;
       dragReadout = null;
       movementRoute = null;
@@ -1468,9 +1566,14 @@
     }
     if (panPointer && panPointer.id === event.pointerId) { panPointer = null; canvas.classList.remove('is-panning'); return; }
     if (activePointer !== event.pointerId) return;
+    if (selectionBox) {
+      completeBoxSelection();
+      activePointer = null;
+      return;
+    }
     if (currentToken) {
       state.tokens.push(currentToken);
-      selectedId = currentToken.id;
+      setSelection([currentToken.id], currentToken.id);
       currentToken = null;
       dragReadout = null;
       broadcastState();
@@ -1481,7 +1584,7 @@
       const shape = currentShape;
       currentShape = null;
       dragReadout = null;
-      if (shape.kind === 'stroke' || Math.hypot(shape.x2 - shape.x1, shape.y2 - shape.y1) > 5) { state.shapes.push(shape); selectedId = shape.id; broadcastState(); }
+      if (shape.kind === 'stroke' || Math.hypot(shape.x2 - shape.x1, shape.y2 - shape.y1) > 5) { state.shapes.push(shape); setSelection([shape.id], shape.id); broadcastState(); }
       else render();
     } else if (dragToken) {
       if (!dragToken.shape && !dragToken.didMove) {
@@ -1609,7 +1712,7 @@
   function focusToken(tokenId) {
     const token = state.tokens.find(item => item.id === tokenId);
     if (!token) return;
-    selectedId = token.id;
+    setSelection([token.id], token.id);
     locatedTokenId = token.id;
     panX = -token.x * zoom;
     panY = -token.y * zoom;
@@ -1674,15 +1777,33 @@
   }
 
   function updateInspectorSelection() {
-    const selected = [...state.tokens, ...state.tiles, ...state.shapes].find(item => item.id === selectedId);
+    const selectedItems = [...state.tokens, ...state.tiles, ...state.shapes].filter(item => selectedIds.has(item.id));
+    const selected = selectedItems.find(item => item.id === selectedId) || selectedItems[0];
     const section = document.querySelector('#selectedSection');
-    section.hidden = !selected;
+    section.hidden = selectedItems.length === 0;
     const details = document.querySelector('#selectedDetails');
-    if (!selected) { details.replaceChildren(); return; }
+    if (!selectedItems.length) { details.replaceChildren(); return; }
+    if (selectedItems.length > 1) {
+      details.innerHTML = `<div class="selected-object"><span>${selectedItems.length} objetos selecionados</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>`;
+      details.querySelector('.delete-selected').addEventListener('click', deleteSelected);
+      return;
+    }
     const label = selected.name || ({ line: 'Linha', circle: 'Círculo', square: 'Quadrado' }[selected.kind] || 'Tile');
+    const selectedWidth = tokenTileCount(selected.widthTiles, selected.radius);
+    const selectedHeight = tokenTileCount(selected.heightTiles, selected.radius);
+    const tokenSizeControl = state.tokens.includes(selected) ? `<div class="token-size-fields spacing-top"><label class="field-label" for="selectedTokenWidth">LARGURA (TILES)<input id="selectedTokenWidth" class="text-input map-number" type="number" min="1" step="1" value="${selectedWidth}"></label><label class="field-label" for="selectedTokenHeight">ALTURA (TILES)<input id="selectedTokenHeight" class="text-input map-number" type="number" min="1" step="1" value="${selectedHeight}"></label></div>` : '';
     const shapeControls = state.shapes.includes(selected) ? `<div class="selected-shape-mode"><label class="field-label" for="selectedShapeMode">MODO</label><select class="text-input" id="selectedShapeMode" data-shape-field="mode"><option value="free" ${selected.mode !== 'construction' && selected.mode !== 'alert' ? 'selected' : ''}>Livre</option><option value="construction" ${selected.mode === 'construction' ? 'selected' : ''}>Construção · bloqueia</option><option value="alert" ${selected.mode === 'alert' ? 'selected' : ''}>Alerta · dano após turnos</option></select>${selected.mode === 'alert' ? `<label class="field-label spacing-top" for="selectedAlertTurns">TURNOS RESTANTES</label><input class="text-input" id="selectedAlertTurns" type="number" min="1" max="99" value="${Math.max(1, selected.alertTurnsRemaining || selected.alertTurnsTotal || 1)}" data-shape-field="alertTurnsRemaining"><label class="field-label spacing-top" for="selectedAlertDamage">DANO</label><input class="text-input" id="selectedAlertDamage" type="number" min="0" max="1000" value="${Math.max(0, selected.alertDamage || 0)}" data-shape-field="alertDamage">` : ''}</div>` : '';
-    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>${shapeControls}`;
+    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>${tokenSizeControl}${shapeControls}`;
     details.querySelector('.delete-selected').addEventListener('click', deleteSelected);
+    for (const [field, input] of [['widthTiles', details.querySelector('#selectedTokenWidth')], ['heightTiles', details.querySelector('#selectedTokenHeight')]]) {
+      input?.addEventListener('input', event => {
+        selected[field] = tokenTileCount(event.target.value, selected.radius);
+        event.target.value = String(selected[field]);
+        drawMapScene(canvas.clientWidth, canvas.clientHeight);
+        drawDragReadout();
+      });
+      input?.addEventListener('change', broadcastState);
+    }
   }
 
   function escapeHTML(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
@@ -1690,12 +1811,13 @@
 
   function deleteSelected() {
     for (const collection of [state.tokens, state.tiles, state.shapes]) {
-      const index = collection.findIndex(item => item.id === selectedId);
-      if (index >= 0) collection.splice(index, 1);
+      for (let index = collection.length - 1; index >= 0; index--) {
+        if (selectedIds.has(collection[index].id)) collection.splice(index, 1);
+      }
     }
-    state.initiative.combatants = state.initiative.combatants.filter(combatant => combatant.tokenId !== selectedId);
-    if (state.initiative.activeTokenId === selectedId) state.initiative.activeTokenId = null;
-    selectedId = null; broadcastState();
+    state.initiative.combatants = state.initiative.combatants.filter(combatant => !selectedIds.has(combatant.tokenId));
+    if (selectedIds.has(state.initiative.activeTokenId)) state.initiative.activeTokenId = null;
+    setSelection([]); broadcastState();
   }
 
   function moveSelectedToken(dx, dy) {
@@ -1858,7 +1980,7 @@
       try {
         const imported = JSON.parse(reader.result);
         if (!Array.isArray(imported.tokens) || !Array.isArray(imported.tiles) || !Array.isArray(imported.shapes)) throw new Error('Formato inválido');
-        state = alignStateToGrid({ ...imported, health: imported.health || state.health }); selectedId = null; broadcastState(); showToast('Mapa importado.');
+        state = alignStateToGrid({ ...imported, health: imported.health || state.health }); setSelection([]); broadcastState(); showToast('Mapa importado.');
       } catch (error) { showToast('Arquivo de mapa inválido.'); }
     };
     reader.readAsText(file);
@@ -1954,7 +2076,7 @@
   document.querySelector('#gridToggle').addEventListener('click', event => { gridVisible = !gridVisible; state.gridVisible = gridVisible; event.currentTarget.classList.toggle('active', !gridVisible); broadcastState(); });
   document.querySelector('#clearButton').addEventListener('click', () => {
     if (!state.tokens.length && !state.tiles.length && !state.shapes.length) return;
-    if (window.confirm('Remover todos os tokens, tiles e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity, health: state.health }; gridVisible = true; selectedId = null; broadcastState(); }
+    if (window.confirm('Remover todos os tokens, tiles e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity, health: state.health }; gridVisible = true; setSelection([]); broadcastState(); }
   });
   document.querySelector('#exportButton').addEventListener('click', exportMap);
   document.querySelector('#importButton').addEventListener('click', () => document.querySelector('#importFile').click());
@@ -1971,7 +2093,7 @@
     event.preventDefault();
     if (magnifierMode !== 0) {
       if (magnifierMode === 2) {
-        magnifierFixedZoom = Math.min(0.8, Math.max(0.1, magnifierFixedZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)));
+        magnifierFixedZoom = Math.min(0.8, Math.max(0.1, magnifierFixedZoom * (event.deltaY < 0 ? 1.05 : 1 / 1.05)));
       } else {
         magnifierZoom = Math.min(8, Math.max(1.5, magnifierZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)));
       }
@@ -1984,7 +2106,7 @@
   window.addEventListener('resize', resizeCanvas);
   window.addEventListener('keydown', event => {
     if (event.code === 'Space' && !event.repeat && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); canvas.dataset.space = 'true'; }
-    if (event.key === 'Escape') { currentShape = null; pendingLineStart = null; linePreview = null; pendingProjectileStart = null; projectilePreview = null; pendingTokenMove = null; movementRoute = null; dragReadout = null; selectedId = null; render(); }
+    if (event.key === 'Escape') { currentShape = null; pendingLineStart = null; linePreview = null; pendingProjectileStart = null; projectilePreview = null; pendingTokenMove = null; movementRoute = null; dragReadout = null; selectionBox = null; setSelection([]); render(); }
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (!['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) && selectedId) deleteSelected();
     }

@@ -133,6 +133,8 @@ button { color: inherit; }
 .map-section .text-input { margin-bottom: 12px; }
 .map-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .map-dimensions .field-label { min-width: 0; margin-top: 2px; }
+.token-size-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.token-size-fields .field-label { min-width: 0; margin: 0; }
 .projectile-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 15px; }
 .projectile-fields label { min-width: 0; }
 .projectile-fields .field-label { min-height: 22px; line-height: 1.4; }

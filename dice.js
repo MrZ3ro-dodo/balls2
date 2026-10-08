@@ -82,6 +82,54 @@
     return true;
   }
 
+  let coinFaceCounter = 0;
+
+  function renderCoinFace(value) {
+    const isHeads = value === 1;
+    const label = isHeads ? 'cara' : 'coroa';
+    const coinFaceId = `coin-face-${++coinFaceCounter}`;
+    const svg = isHeads ? `
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <defs>
+          <linearGradient id="${coinFaceId}-gold" x1="0" x2="1">
+            <stop offset="0%" stop-color="#fdf0b5" />
+            <stop offset="45%" stop-color="#e8bf55" />
+            <stop offset="100%" stop-color="#b9781a" />
+          </linearGradient>
+        </defs>
+        <circle cx="24" cy="24" r="20" fill="url(#${coinFaceId}-gold)" stroke="#86560f" stroke-width="2" />
+        <circle cx="24" cy="24" r="10" fill="#fff6d6" opacity="0.9" />
+        <path d="M17 28c3-3.2 11-3.2 14 0" stroke="#8b5813" stroke-width="2.2" stroke-linecap="round" fill="none" />
+        <circle cx="20" cy="20" r="2.1" fill="#8b5813" />
+        <circle cx="28" cy="20" r="2.1" fill="#8b5813" />
+      </svg>
+    ` : `
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <defs>
+          <linearGradient id="${coinFaceId}-silver" x1="0" x2="1">
+            <stop offset="0%" stop-color="#f2f8ff" />
+            <stop offset="45%" stop-color="#b9d4ea" />
+            <stop offset="100%" stop-color="#6a8aa5" />
+          </linearGradient>
+          <linearGradient id="${coinFaceId}-gold" x1="0" x2="1">
+            <stop offset="0%" stop-color="#fff0a8" />
+            <stop offset="50%" stop-color="#efc761" />
+            <stop offset="100%" stop-color="#b57a1d" />
+          </linearGradient>
+        </defs>
+        <circle cx="24" cy="24" r="20" fill="url(#${coinFaceId}-silver)" stroke="#4b5e74" stroke-width="2" />
+        <path d="M14 30.5L18 17.5L23 25.5L24 14.5L25 25.5L30 17.5L34 30.5H14Z" fill="url(#${coinFaceId}-gold)" stroke="#925d1e" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M18 30.5H30V32.8H18Z" fill="#fff4c7" opacity="0.9"/>
+        <circle cx="18" cy="17.5" r="2.1" fill="#fff9e6" stroke="#9d6d22" stroke-width="1.2" />
+        <circle cx="24" cy="14.5" r="2.3" fill="#fff9e6" stroke="#9d6d22" stroke-width="1.2" />
+        <circle cx="30" cy="17.5" r="2.1" fill="#fff9e6" stroke="#9d6d22" stroke-width="1.2" />
+        <path d="M20.5 27.5H27.5V29.2H20.5Z" fill="#b57a1d" opacity="0.7"/>
+        <circle cx="24" cy="23.6" r="3.2" fill="#fff8de" stroke="#8c611d" stroke-width="1.2"/>
+      </svg>
+    `;
+    return `<div class="rolling-die is-settled coin-face coin-face-${isHeads ? 'heads' : 'tails'}" aria-label="${label}" title="${label}"><span>${svg}</span></div>`;
+  }
+
   function renderRoll(roll, animate = true) {
     if (!isValidRoll(roll) || !rememberRoll(roll.id)) return;
     setPanelOpen(true);
@@ -104,8 +152,8 @@
       rollTimer = window.setTimeout(() => {
         const stageElement = results.querySelector('.dice-roll-stage');
         if (stageElement) stageElement.innerHTML = roll.values.map(value => {
-          const face = roll.sides === 2 ? (value === 1 ? 'C' : 'K') : value;
-          return `<div class="rolling-die is-settled"><span>${face}</span></div>`;
+          if (roll.sides === 2) return renderCoinFace(value);
+          return `<div class="rolling-die is-settled"><span>${value}</span></div>`;
         }).join('');
         rollButton.disabled = false;
         rollButton.textContent = 'Rolar novamente';
