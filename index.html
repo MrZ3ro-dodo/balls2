@@ -10,9 +10,11 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="characters.css">
+  <link rel="stylesheet" href="audio.css">
   <link rel="stylesheet" href="dice.css">
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
   <script src="characters.js" defer></script>
+  <script src="audio.js" defer></script>
   <script src="app.js" defer></script>
   <script src="dice.js" defer></script>
 </head>
@@ -27,7 +29,8 @@
       </a>
       <nav class="view-switcher" aria-label="Áreas do Stone Plate">
         <button class="view-button active" id="mapViewButton" type="button" aria-pressed="true">Mapa</button>
-        <button class="view-button" id="charactersViewButton" type="button" aria-pressed="false">Personagens</button>
+        <button class="view-button" id="charactersViewButton" type="button" aria-pressed="false">Configurações</button>
+        <button class="view-button" id="adminViewButton" type="button" aria-pressed="false">Admin</button>
       </nav>
       <div class="room-controls">
         <span class="connection-indicator" id="connectionIndicator"><i></i><span id="connectionLabel">Local</span></span>
@@ -129,9 +132,31 @@
           <div id="projectileOptions" class="options-content" hidden>
             <label class="field-label" for="projectileType">TIPO DE PROJÉTIL</label>
             <select id="projectileType" class="text-input">
-              <option value="arrow">Flecha</option>
-              <option value="fire">Fogo</option>
-              <option value="arcane">Arcano</option>
+              <option value="nullus">Nullus</option>
+              <option value="bansho">Bansho</option>
+              <option value="brutalis">Brutalis</option>
+              <option value="geo">Geo</option>
+              <option value="tormenta">Tormenta</option>
+              <option value="ignus">Ignus</option>
+              <option value="echo">Echo</option>
+              <option value="psykos">Psykos</option>
+              <option value="pestys">Pestys</option>
+              <option value="quimera">Quimera</option>
+              <option value="techno">Techno</option>
+              <option value="gravitas">Gravitas</option>
+              <option value="spatium">Spatium</option>
+              <option value="kronus">Kronus</option>
+              <option value="umbrasis">Umbrasis</option>
+              <option value="santis">Santis</option>
+              <option value="inmortus">Inmortus</option>
+              <option value="aius">Aius</option>
+              <option value="selenis">Selenis</option>
+              <option value="helios">Helios</option>
+              <option value="draco">Draco</option>
+              <option value="inanis">Inanis</option>
+              <option value="kaos">Kaos</option>
+              <option value="destructio">Destructio</option>
+              <option value="creatio">Creatio</option>
             </select>
             <label class="field-label spacing-top" for="projectileAngle">DIREÇÃO (8 ÂNGULOS)</label>
             <select id="projectileAngle" class="text-input">
@@ -147,9 +172,14 @@
             </select>
             <div class="projectile-fields">
               <label><span class="field-label">ÁREA (TILES)</span><input id="projectileAoe" class="text-input" type="number" min="0" max="20" step="0.5" value="0"></label>
-              <label><span class="field-label">VELOCIDADE / TURNO</span><input id="projectileSpeed" class="text-input" type="number" min="0.1" max="20" step="0.5" value="1"></label>
+              <label><span class="field-label">VELOCIDADE (TILES/S)</span><input id="projectileSpeed" class="text-input" type="number" min="1" max="999" step="1" value="1"></label>
+              <label><span class="field-label">LARGURA (TILES)</span><input id="projectileWidth" class="text-input" type="number" min="0.25" max="8" step="0.25" value="0.5"></label>
+              <label><span class="field-label">ALTURA (TILES)</span><input id="projectileHeight" class="text-input" type="number" min="0.25" max="8" step="0.25" value="0.5"></label>
               <label class="projectile-damage-field"><span class="field-label">DANO POR ACERTO</span><input id="projectileDamage" class="text-input" type="number" min="0" max="1000" step="1" value="0"></label>
+              <label class="projectile-damage-field"><span class="field-label">DADOS DE DANO</span><input id="projectileDamageDice" class="text-input" type="text" maxlength="100" placeholder="Ex.: 2d6+3"></label>
             </div>
+            <label class="check-row"><input id="projectileLinearTrail" type="checkbox"><span class="custom-check"></span><span>Rastro linear</span></label>
+            <label class="check-row"><input id="projectileAutoRollDamage" type="checkbox"><span class="custom-check"></span><span>Rolar dano automaticamente ao acertar</span></label>
             <label class="check-row"><input id="projectilePierce" type="checkbox"><span class="custom-check"></span><span>Perfurante</span></label>
             <label class="check-row"><input id="projectileInstant" type="checkbox"><span class="custom-check"></span><span>Avanço instantâneo</span></label>
             <p class="field-note">Clique na origem e no destino para traçar a rota por tiles. A direção automática escolhe a mais próxima das oito.</p>
@@ -263,8 +293,32 @@
         </section>
       </aside>
     </main>
-    <main class="health-workspace" id="healthWorkspace" aria-label="Personagens e estatísticas" hidden>
+    <main class="health-workspace" id="healthWorkspace" aria-label="Configurações da mesa" hidden>
+      <div id="audioManager"></div>
       <div class="characters-manager" id="charactersManager"></div>
+    </main>
+    <main class="health-workspace admin-workspace" id="adminWorkspace" aria-label="Biblioteca administrativa" hidden>
+      <header class="admin-heading">
+        <div><span class="eyebrow">BIBLIOTECA LOCAL</span><h1>Administração</h1></div>
+        <p>Salve mapas completos e configurações reutilizáveis nesta instalação.</p>
+      </header>
+      <div class="admin-libraries">
+        <section class="admin-library" aria-labelledby="savedMapsHeading">
+          <div class="admin-library-heading"><h2 id="savedMapsHeading">Mapas</h2><span>Tabuleiro, tiles e tokens</span></div>
+          <form class="admin-save-row" data-library-form="maps"><label class="sr-only" for="saveMapName">Nome do mapa</label><input class="text-input" id="saveMapName" name="name" maxlength="50" placeholder="Nome do mapa" required><button class="button button-primary" type="submit">Salvar mapa atual</button></form>
+          <div class="admin-saved-list" id="savedMapsList"></div>
+        </section>
+        <section class="admin-library" aria-labelledby="savedProjectilesHeading">
+          <div class="admin-library-heading"><h2 id="savedProjectilesHeading">Projéteis</h2><span>Tipo, direção, área, dano e movimento</span></div>
+          <form class="admin-save-row" data-library-form="projectiles"><label class="sr-only" for="saveProjectileName">Nome da configuração</label><input class="text-input" id="saveProjectileName" name="name" maxlength="50" placeholder="Nome da configuração" required><button class="button button-primary" type="submit">Salvar configuração</button></form>
+          <div class="admin-saved-list" id="savedProjectilesList"></div>
+        </section>
+        <section class="admin-library" aria-labelledby="savedTokensHeading">
+          <div class="admin-library-heading"><h2 id="savedTokensHeading">Tokens</h2><span>Nome, cor e dimensões</span></div>
+          <form class="admin-save-row" data-library-form="tokens"><label class="sr-only" for="saveTokenName">Nome do modelo</label><input class="text-input" id="saveTokenName" name="name" maxlength="50" placeholder="Nome do modelo" required><button class="button button-primary" type="submit">Salvar token atual</button></form>
+          <div class="admin-saved-list" id="savedTokensList"></div>
+        </section>
+      </div>
     </main>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </div>

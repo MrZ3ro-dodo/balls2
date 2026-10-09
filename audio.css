@@ -1,0 +1,65 @@
+#audioManager { min-width: 0; }
+.audio-desk { max-width: 1180px; margin: 0 auto; padding: 30px clamp(18px, 3vw, 42px) 0; color: #e8e8dd; }
+.audio-desk-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 22px; border-bottom: 1px solid #343a36; }
+.audio-desk-header h1 { margin: 5px 0 0; font-size: 20px; line-height: 1.25; }
+.audio-desk-header p { margin: 7px 0 0; color: #8c918b; font-size: 12px; }
+.audio-import-button { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; padding: 0 14px; border: 1px solid #c1d48a; border-radius: 3px; background: #c1d48a; color: #20251d; cursor: pointer; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.audio-import-button:hover { background: #d0e49a; }
+.audio-desk-layout { display: grid; grid-template-columns: minmax(220px, .78fr) minmax(0, 1.55fr); gap: 0 28px; padding: 23px 0 26px; border-bottom: 1px solid #343a36; }
+.audio-library, .audio-console { min-width: 0; }
+.audio-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.audio-panel-heading h2 { margin: 0; font-size: 14px; }
+.audio-panel-heading > span { color: #879184; font: 10px "DM Mono", Consolas, monospace; }
+.audio-track-list { display: grid; max-height: 255px; gap: 4px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+.audio-track { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 32px; align-items: center; border: 1px solid transparent; border-radius: 3px; background: #1e2220; }
+.audio-track.is-selected { border-color: #59644f; background: #282e29; }
+.audio-track-select { display: grid; min-width: 0; min-height: 39px; grid-template-columns: 25px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 0 9px; border: 0; background: transparent; color: #c8cec4; text-align: left; cursor: pointer; }
+.audio-track-select:hover { color: #e8e8dd; }
+.audio-track-mark { color: #c1d48a; font-size: 14px; text-align: center; }
+.audio-track-name { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.audio-track-duration { color: #858d83; font: 9px "DM Mono", Consolas, monospace; }
+.audio-remove-track { width: 26px; height: 26px; border: 0; border-radius: 3px; background: transparent; color: #a57e70; cursor: pointer; font-size: 17px; }
+.audio-remove-track:hover { background: #3a2b27; color: #df8568; }
+.audio-empty, .audio-storage-note { color: #838a83; font-size: 10px; }
+.audio-empty { padding: 13px 8px; }
+.audio-storage-note { margin: 11px 0 0; }
+.audio-console { padding-left: 25px; border-left: 1px solid #343a36; }
+.audio-now-playing { display: flex; min-width: 0; align-items: center; gap: 11px; }
+.audio-live-dot { width: 9px; height: 9px; flex: 0 0 9px; border: 1px solid #8e9c70; border-radius: 50%; background: #c1d48a; box-shadow: 0 0 11px #c1d48a55; }
+.audio-overline { color: #879184; font: 9px "DM Mono", Consolas, monospace; }
+.audio-now-playing h2 { overflow: hidden; margin: 3px 0 0; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.audio-transport { display: flex; align-items: center; gap: 8px; margin: 17px 0 11px; }
+.audio-play-button, .audio-stop-button { display: inline-grid; width: 34px; height: 34px; place-items: center; border: 1px solid #4a5347; border-radius: 3px; background: #30382f; color: #c1d48a; cursor: pointer; }
+.audio-play-button { font-size: 15px; }
+.audio-stop-button { width: 30px; height: 30px; color: #b4bbb1; font-size: 11px; }
+.audio-play-button:hover, .audio-stop-button:hover { border-color: #829769; background: #394238; }
+.audio-loop-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: #b6bdb3; font-size: 10px; cursor: pointer; }
+.audio-loop-toggle input, .audio-check-option input { accent-color: #c1d48a; }
+.audio-timeline { display: grid; grid-template-columns: 35px minmax(0, 1fr) 35px; align-items: center; gap: 9px; color: #929a90; font: 9px "DM Mono", Consolas, monospace; }
+.audio-timeline input, .audio-control input[type="range"] { width: 100%; height: 4px; accent-color: #c1d48a; cursor: pointer; }
+.audio-timeline span:last-child { text-align: right; }
+.audio-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px 20px; margin-top: 21px; }
+.audio-control { display: grid; min-width: 0; gap: 6px; }
+.audio-control > span { display: flex; justify-content: space-between; gap: 8px; color: #9ba397; font: 9px "DM Mono", Consolas, monospace; }
+.audio-control output { color: #e0e6d8; font-size: 10px; white-space: nowrap; }
+.audio-control small { color: #6f786f; font-size: 9px; }
+.audio-pause-options { display: grid; grid-template-columns: 1fr 1.2fr; align-items: center; gap: 14px; margin-top: 20px; padding-top: 14px; border-top: 1px solid #343a36; }
+.audio-check-option { display: flex; align-items: center; gap: 7px; color: #bec5b9; font-size: 10px; cursor: pointer; }
+.audio-time-pause { display: grid; grid-template-columns: minmax(90px, 1fr) 75px auto; align-items: center; gap: 7px; }
+.audio-time-pause label { color: #929a90; font-size: 9px; }
+.audio-time-pause input { width: 75px; height: 29px; padding: 0 7px; border: 1px solid #3b433d; border-radius: 3px; outline: 0; background: #191d1b; color: #e8e8dd; font: 10px "DM Mono", Consolas, monospace; }
+.audio-time-pause input:focus { border-color: #829769; }
+.audio-time-pause button { min-height: 29px; padding: 0 8px; border: 1px solid #434b43; border-radius: 3px; background: #252a27; color: #e8e8dd; cursor: pointer; font-size: 9px; white-space: nowrap; }
+.audio-time-pause button:hover { border-color: #7f9171; color: #c1d48a; }
+.audio-status { min-height: 14px; margin: 13px 0 0; color: #879184; font-size: 9px; }
+@media (max-width: 900px) {
+  .audio-desk-layout { grid-template-columns: 1fr; gap: 20px; }
+  .audio-console { padding: 20px 0 0; border-top: 1px solid #343a36; border-left: 0; }
+  .audio-track-list { max-height: 170px; }
+}
+@media (max-width: 580px) {
+  .audio-desk-header { align-items: start; flex-direction: column; }
+  .audio-import-button { width: 100%; }
+  .audio-control-grid { gap: 13px 14px; }
+  .audio-pause-options { grid-template-columns: 1fr; }
+}

@@ -1,9 +1,22 @@
 (() => {
   const CHANNEL_NAME = 'stone-plate-state-v1';
   const SIDES = [2, 4, 6, 8, 10, 12, 20, 30, 60, 100];
+  const CRITICAL_THRESHOLDS = {
+    2: [2, 2, 2, 2, 2],
+    4: [4, 4, 3, 3, 2],
+    6: [6, 6, 5, 5, 4],
+    8: [8, 8, 7, 7, 6],
+    10: [10, 9, 8, 7, 6],
+    12: [12, 11, 10, 9, 8],
+    20: [20, 19, 18, 17, 16],
+    30: [30, 29, 28, 27, 26],
+    60: [60, 59, 58, 57, 56],
+    100: [100, 99, 98, 97, 96]
+  };
   const channel = 'BroadcastChannel' in window ? new BroadcastChannel(CHANNEL_NAME) : null;
   const seenRolls = new Set();
   let selectedSides = 20;
+  let selectedCriticalRate = 1;
   let rollTimer = 0;
 
   document.body.insertAdjacentHTML('beforeend', `
@@ -21,14 +34,18 @@
           <button class="dice-close" id="diceClose" type="button" aria-label="Fechar rolagem de dados" title="Fechar">×</button>
         </header>
         <label class="dice-label">TIPO DE DADO</label>
-        <div class="dice-type-grid" role="group" aria-label="Tipo de dado">
-          ${SIDES.map(sides => `<button class="dice-type-button" type="button" data-die-sides="${sides}" aria-pressed="${sides === selectedSides}">${sides === 2 ? 'Moeda' : `d${sides}`}</button>`).join('')}
+        <div class="dice-type-grid" role="group" aria-label="Selecionar tipo de dado; Shift para combinar tipos">
+          ${SIDES.map(sides => `<button class="dice-type-button" type="button" data-die-sides="${sides}" aria-pressed="${sides === selectedSides}" aria-label="Selecionar ${sides === 2 ? 'moeda' : `d${sides}`}; Shift+clique para combinar" title="Selecionar; Shift+clique para combinar">${sides === 2 ? 'Moeda' : `d${sides}`}</button>`).join('')}
         </div>
-        <label class="dice-label" for="diceExpression" style="margin-top:15px">QUANTIDADE</label>
+        <label class="dice-label dice-critical-label">TAXA DE CRÍTICO</label>
+        <div class="dice-critical-grid" role="group" aria-label="Selecionar taxa de crítico">
+          ${[1, 2, 3, 4, 5].map(rate => `<button class="dice-critical-button" type="button" data-critical-rate="${rate}" aria-pressed="${rate === selectedCriticalRate}" aria-label="Taxa de crítico ${rate}">${rate}</button>`).join('')}
+        </div>
+        <p class="dice-critical-range" id="diceCriticalRange" aria-live="polite"></p>
+        <label class="dice-label" for="diceExpression">EXPRESSÃO DE ROLAGEM</label>
         <div class="dice-expression-row">
-          <input class="dice-expression" id="diceExpression" type="number" inputmode="numeric" min="1" max="999" step="1" value="1" placeholder="_" autocomplete="off" aria-describedby="diceExpressionError">
-          <span class="dice-expression-suffix" id="diceNotation">d20</span>
-          <span class="dice-expression-note">ATÉ 999</span>
+          <input class="dice-expression" id="diceExpression" type="text" inputmode="text" value="1d20" placeholder="2d6+1d20+4" autocomplete="off" aria-describedby="diceExpressionError">
+          <span class="dice-expression-note">ex.: 1d20+4</span>
         </div>
         <p class="dice-expression-error" id="diceExpressionError" aria-live="polite"></p>
         <button class="dice-roll-button" id="diceRollButton" type="button">Rolar dados</button>
@@ -42,7 +59,7 @@
   const error = document.querySelector('#diceExpressionError');
   const rollButton = document.querySelector('#diceRollButton');
   const results = document.querySelector('#diceResults');
-  const notation = document.querySelector('#diceNotation');
+  const criticalRange = document.querySelector('#diceCriticalRange');
 
   function setPanelOpen(isOpen) {
     panel.hidden = !isOpen;
@@ -52,13 +69,54 @@
   }
 
   function parseExpression() {
-    const quantity = Number(expression.value);
-    const valid = expression.value !== '' && Number.isInteger(quantity) && quantity >= 1 && quantity <= 999;
+    const source = expression.value.replace(/\s+/g, '').toLowerCase();
+    const terms = [...source.matchAll(/([+-]?)(?:(\d*)d(\d+)|(\d+))/g)];
+    const validSyntax = source.length > 0 && terms.length > 0 && terms.map(term => term[0]).join('') === source;
+    const groups = [];
+    let modifier = 0;
+    let quantity = 0;
+    if (validSyntax) {
+      for (const [index, term] of terms.entries()) {
+        if (index > 0 && !term[1]) { quantity = 1000; break; }
+        const sign = term[1] === '-' ? -1 : 1;
+        if (term[3] !== undefined) {
+          const count = Number(term[2] || 1);
+          const sides = Number(term[3]);
+          quantity += count;
+          if (!SIDES.includes(sides) || !Number.isInteger(count) || count < 1 || count > 999) {
+            quantity = 1000;
+            break;
+          }
+          const group = groups.find(item => item.sides === sides);
+          if (sign < 0) { quantity = 1000; break; }
+          if (group) group.quantity += count;
+          else groups.push({ sides, quantity: count });
+        } else modifier += sign * Number(term[4]);
+      }
+    }
+    const valid = validSyntax && groups.length > 0 && groups.length <= 20 && quantity <= 999 &&
+      Number.isSafeInteger(modifier) && Math.abs(modifier) <= 100000;
+    if (valid) selectedSides = groups[groups.length - 1].sides;
+    document.querySelectorAll('[data-die-sides]').forEach(button => {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.dieSides) === selectedSides));
+    });
     expression.setAttribute('aria-invalid', String(!valid));
-    error.textContent = valid ? '' : 'Informe uma quantidade de 1 a 999.';
+    error.textContent = valid ? '' : 'Use dados válidos, como 2d6+1d20+4 (até 999 dados).';
+    updateCriticalRange(valid ? groups : []);
     rollButton.disabled = !valid;
-    document.querySelectorAll('[data-die-sides]').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.dieSides) === selectedSides)));
-    return valid ? { quantity, sides: selectedSides } : null;
+    return valid ? { groups, modifier, quantity, expression: source } : null;
+  }
+
+  function criticalThreshold(sides, rate = selectedCriticalRate) {
+    return CRITICAL_THRESHOLDS[sides][rate - 1];
+  }
+
+  function updateCriticalRange(groups) {
+    const ranges = [...new Set(groups.map(group => group.sides))].map(sides => {
+      const threshold = criticalThreshold(sides);
+      return `d${sides} ${threshold}${threshold < sides ? `–${sides}` : ''}`;
+    });
+    criticalRange.textContent = ranges.length ? `Crítico ${selectedCriticalRate}: ${ranges.join(' · ')}` : '';
   }
 
   function randomFace(sides) {
@@ -69,10 +127,16 @@
   }
 
   function isValidRoll(roll) {
-    return Boolean(roll && typeof roll.id === 'string' && roll.id.length <= 80 && SIDES.includes(roll.sides) &&
-      Number.isInteger(roll.quantity) && roll.quantity >= 1 && roll.quantity <= 999 &&
-      Array.isArray(roll.values) && roll.values.length === roll.quantity &&
-      roll.values.every(value => Number.isInteger(value) && value >= 1 && value <= roll.sides));
+    return Boolean(roll && typeof roll.id === 'string' && roll.id.length <= 80 &&
+      Number.isInteger(roll.criticalRate) && roll.criticalRate >= 1 && roll.criticalRate <= 5 &&
+      typeof roll.expression === 'string' && roll.expression.length <= 100 &&
+      /^[+-]?(?:\d*d\d+|\d+)(?:[+-](?:\d*d\d+|\d+))*$/i.test(roll.expression) &&
+      Number.isSafeInteger(roll.modifier) && Math.abs(roll.modifier) <= 100000 &&
+      Array.isArray(roll.groups) && roll.groups.length > 0 && roll.groups.length <= 20 &&
+      roll.groups.every(group => group && typeof group === 'object' && SIDES.includes(group.sides) && Array.isArray(group.values) &&
+        group.values.length > 0 && group.values.length <= 999 &&
+        group.values.every(value => Number.isInteger(value) && value >= 1 && value <= group.sides)) &&
+      roll.groups.reduce((sum, group) => sum + group.values.length, 0) <= 999);
   }
 
   function rememberRoll(id) {
@@ -86,6 +150,7 @@
 
   function renderCoinFace(value) {
     const isHeads = value === 1;
+    const isCritical = value === 2;
     const label = isHeads ? 'cara' : 'coroa';
     const coinFaceId = `coin-face-${++coinFaceCounter}`;
     const svg = isHeads ? `
@@ -127,34 +192,46 @@
         <circle cx="24" cy="23.6" r="3.2" fill="#fff8de" stroke="#8c611d" stroke-width="1.2"/>
       </svg>
     `;
-    return `<div class="rolling-die is-settled coin-face coin-face-${isHeads ? 'heads' : 'tails'}" aria-label="${label}" title="${label}"><span>${svg}</span></div>`;
+    const sparks = isCritical ? '<i class="gold-spark spark-one"></i><i class="gold-spark spark-two"></i><i class="gold-spark spark-three"></i><i class="gold-spark spark-four"></i>' : '';
+    return `<div class="rolling-die is-settled coin-face coin-face-${isHeads ? 'heads' : 'tails'}${isCritical ? ' is-critical' : ''}" aria-label="${label}" title="${label}"><span>${svg}</span>${sparks}</div>`;
+  }
+
+  function renderDie(value, sides, animate = false, index = 0) {
+    if (sides === 2) {
+      if (!animate) return renderCoinFace(value);
+      return `<div class="rolling-die coin-face coin-rolling" style="--roll-delay:${Math.min(index * 14, 280)}ms"><span>·</span></div>`;
+    }
+    const critical = value >= criticalThreshold(sides);
+    return `<div class="rolling-die${animate ? '' : ' is-settled'}${critical ? ' is-critical' : ''}"${animate ? ` style="--roll-delay:${Math.min(index * 14, 280)}ms"` : ''}><span>${animate ? '·' : value}</span>${critical ? '<i class="gold-spark spark-one"></i><i class="gold-spark spark-two"></i><i class="gold-spark spark-three"></i><i class="gold-spark spark-four"></i>' : ''}</div>`;
   }
 
   function renderRoll(roll, animate = true) {
     if (!isValidRoll(roll) || !rememberRoll(roll.id)) return;
     setPanelOpen(true);
-    selectedSides = roll.sides;
-    expression.value = String(roll.quantity);
-    notation.textContent = roll.sides === 2 ? 'moeda' : `d${roll.sides}`;
+    selectedCriticalRate = roll.criticalRate;
+    document.querySelectorAll('[data-critical-rate]').forEach(button => {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.criticalRate) === selectedCriticalRate));
+    });
+    expression.value = roll.expression;
     parseExpression();
     rollButton.disabled = animate;
     rollButton.textContent = animate ? 'Rolando…' : 'Rolar dados';
-    const total = roll.values.reduce((sum, value) => sum + value, 0);
-    const coinHeads = roll.values.filter(value => value === 1).length;
-    const shownTotal = roll.sides === 2 ? `${coinHeads} caras · ${roll.quantity - coinHeads} coroas` : `Total ${total}`;
-    const header = `<div class="dice-result-heading"><span class="dice-result-expression">${roll.quantity} × ${roll.sides === 2 ? 'moeda' : `d${roll.sides}`}</span><strong class="dice-result-total">${shownTotal}</strong></div>`;
+    const total = roll.groups.reduce((sum, group) => sum + group.values.reduce((groupSum, value) => groupSum + value, 0), roll.modifier);
+    const coinGroup = roll.groups.find(group => group.sides === 2);
+    const coinHeads = coinGroup ? coinGroup.values.filter(value => value === 1).length : 0;
+    const coinCount = coinGroup?.values.length || 0;
+    const detail = coinCount ? `<span class="dice-coin-detail">${coinHeads} caras · ${coinCount - coinHeads} coroas</span>` : '';
+    const modifier = roll.modifier ? ` ${roll.modifier > 0 ? '+' : '−'} ${Math.abs(roll.modifier)}` : '';
+    const header = `<div class="dice-result-heading"><span class="dice-result-expression">${roll.expression}</span><strong class="dice-result-total">Total ${total}</strong></div>${detail}`;
     const stage = animate
-      ? `<div class="dice-roll-stage" aria-label="Dados rolando">${roll.values.map((_, index) => `<div class="rolling-die" style="--roll-delay:${Math.min(index * 14, 280)}ms"><span>·</span></div>`).join('')}</div>`
+      ? `<div class="dice-roll-stage" aria-label="Dados rolando">${roll.groups.flatMap(group => group.values.map((_, index) => renderDie(0, group.sides, true, index))).join('')}</div>`
       : '';
-    results.innerHTML = `${header}${stage}`;
+    results.innerHTML = `${header}${modifier ? `<div class="dice-result-modifier">Modificador${modifier}</div>` : ''}${stage}`;
     window.clearTimeout(rollTimer);
     if (animate) {
       rollTimer = window.setTimeout(() => {
         const stageElement = results.querySelector('.dice-roll-stage');
-        if (stageElement) stageElement.innerHTML = roll.values.map(value => {
-          if (roll.sides === 2) return renderCoinFace(value);
-          return `<div class="rolling-die is-settled"><span>${value}</span></div>`;
-        }).join('');
+        if (stageElement) stageElement.innerHTML = roll.groups.flatMap(group => group.values.map(value => renderDie(value, group.sides))).join('');
         rollButton.disabled = false;
         rollButton.textContent = 'Rolar novamente';
       }, 1350);
@@ -164,29 +241,68 @@
   function rollDice() {
     const parsed = parseExpression();
     if (!parsed) { expression.focus(); return; }
+    const groups = parsed.groups.map(group => ({
+      sides: group.sides,
+      values: Array.from({ length: group.quantity }, () => randomFace(group.sides))
+    }));
     const roll = {
       id: crypto.randomUUID(),
-      sides: parsed.sides,
-      quantity: parsed.quantity,
-      values: Array.from({ length: parsed.quantity }, () => randomFace(parsed.sides)),
+      expression: parsed.expression,
+      modifier: parsed.modifier,
+      criticalRate: selectedCriticalRate,
+      groups,
       timestamp: Date.now()
     };
     if (window.StonePlate?.broadcastDiceRoll) window.StonePlate.broadcastDiceRoll(roll);
     else channel?.postMessage({ type: 'dice-roll', roll });
     renderRoll(roll);
+    return roll;
   }
+
+  window.StonePlateDice = {
+    rollExpression(source) {
+      setPanelOpen(true);
+      expression.value = String(source || '').trim();
+      if (!parseExpression()) return false;
+      return rollDice();
+    }
+  };
 
   toggle.addEventListener('click', () => setPanelOpen(panel.hidden));
   document.querySelector('#diceClose').addEventListener('click', () => setPanelOpen(false));
+  document.querySelectorAll('[data-critical-rate]').forEach(button => button.addEventListener('click', () => {
+    selectedCriticalRate = Number(button.dataset.criticalRate);
+    document.querySelectorAll('[data-critical-rate]').forEach(option => {
+      option.setAttribute('aria-pressed', String(Number(option.dataset.criticalRate) === selectedCriticalRate));
+    });
+    parseExpression();
+  }));
   expression.addEventListener('input', parseExpression);
   expression.addEventListener('keydown', event => { if (event.key === 'Enter') rollDice(); });
-  document.querySelectorAll('[data-die-sides]').forEach(button => button.addEventListener('click', () => {
-    selectedSides = Number(button.dataset.dieSides);
-    notation.textContent = selectedSides === 2 ? 'moeda' : `d${selectedSides}`;
+  document.querySelectorAll('[data-die-sides]').forEach(button => button.addEventListener('click', event => {
+    const sides = Number(button.dataset.dieSides);
+    const parsed = parseExpression();
+    if (parsed && (event.shiftKey || sides === selectedSides)) {
+      const terms = [...expression.value.replace(/\s+/g, '').toLowerCase().matchAll(/([+-]?)(?:(\d*)d(\d+)|(\d+))/g)];
+      let merged = false;
+      expression.value = terms.map(term => {
+        if (term[3] !== undefined && Number(term[3]) === sides) {
+          if (merged) return '';
+          merged = true;
+          return `${term[1]}${Number(term[2] || 1) + 1}d${sides}`;
+        }
+        return term[0];
+      }).filter(Boolean).join('');
+      if (!merged) expression.value = `${expression.value}+1d${sides}`;
+    } else {
+      const modifier = parsed?.modifier || 0;
+      expression.value = `1d${sides}${modifier ? `${modifier > 0 ? '+' : ''}${modifier}` : ''}`;
+    }
     parseExpression();
     expression.focus();
   }));
   rollButton.addEventListener('click', rollDice);
+  parseExpression();
   channel?.addEventListener('message', event => {
     if (event.data?.type === 'dice-roll') renderRoll(event.data.roll);
   });
