@@ -9,6 +9,7 @@
   const LEGACY_STORAGE_KEY = 'talus-board-v1';
   const LEGACY_HEALTH_STORAGE_KEY = 'health-state';
   const GRID = 64;
+  const MAX_ELEVATION_TILES = 2;
   const MAX_MAP_DIMENSION = 10000;
   const DEFAULT_OPACITY = 0.65;
   const DEFAULT_MAP = { shape: 'square', width: 50, height: 50 };
@@ -47,14 +48,14 @@
     creatio: { label: 'Creatio', color: '#9e59d8', accent: '#1b1228', form: 'creation', particle: 'spark', trailOpacity: 0.64 }
   };
   const defaultHealthState = () => ({ currentHp: 80, maxHp: 100, color: '#22c55e', label: 'HP', textOutlineColor: '#111827', displayMode: 'values', imageDataUrl: '', damageEmoji: '💥', characters: [{ id: crypto.randomUUID(), name: 'Personagem 1', vitality: 70, vitalityMax: 100, lucidity: 55, lucidityMax: 100, linkedTokenId: null, imageDataUrl: '', emojiAuraEnabled: false, emojiAuraEmoji: '💥' }], bossName: 'Boss', bossMovement: 'none', bossAfterImageModes: ['bruta'], bossAfterImageColor: '#ff4d4d', turnOrder: [], activeTurnIndex: 0, lastDamage: null });
-  const defaultState = () => ({ tokens: [], tiles: [], shapes: [], opacity: DEFAULT_OPACITY, gridVisible: true, map: { ...DEFAULT_MAP }, initiative: { round: 1, activeTokenId: null, combatants: [] }, health: defaultHealthState() });
+  const defaultState = () => ({ tokens: [], tiles: [], shapes: [], elevation: [], layers: [{ id: 'layer-1', name: 'Camada 1' }], activeLayerId: 'layer-1', opacity: DEFAULT_OPACITY, gridVisible: true, map: { ...DEFAULT_MAP }, initiative: { round: 1, activeTokenId: null, combatants: [] }, health: defaultHealthState() });
   const stateChannel = 'BroadcastChannel' in window ? new BroadcastChannel('stone-plate-state-v1') : null;
   const stateSubscribers = new Set();
   const seenDiceRolls = new Set();
   let state = loadState();
   let adminLibrary = loadAdminLibrary();
   let tool = 'select';
-  let tileType = 'stone';
+  let elevationLevel = 0.25;
   let zoom = 1;
   let panX = 0;
   let panY = 0;
@@ -85,19 +86,24 @@
   const seenProjectiles = new Set();
   const seenProjectileTurns = new Set();
   let pendingTokenMove = null;
+  let plannedMove = null;
+  let movementMode = 'free';
   let locatedTokenId = null;
   let locateTimer = 0;
   let initiativeUiSignature = '';
+  let layerUiSignature = '';
   let dragToken = null;
   let dragReadout = null;
   let movementRoute = null;
   let aimWorld = null;
   let panPointer = null;
-  let lastPaintCell = '';
   let peer = null;
   let hostMode = false;
   let roomId = '';
   let connections = new Map();
+  let roomRole = 'admin';
+  let localMemberTokenId = null;
+  const roomMembers = new Map();
   let toastTimer = 0;
   let mapPathCacheKey = '';
   let mapPathCache = null;
@@ -322,8 +328,9 @@
     saveState();
     render();
     notifyStateSubscribers();
+    updatePlayers();
     if (hostMode) broadcast({ type: 'state', state });
-    else if (peer && connections.has('host')) connections.get('host').send({ type: 'state', state });
+    else if (peer && connections.has('host') && roomRole === 'admin') connections.get('host').send({ type: 'state', state });
   }
 
   function updateHealth(mutator) {
@@ -360,7 +367,7 @@
       if (!position) { complete = false; break; }
       const token = {
         id: crypto.randomUUID(), ...position, widthTiles: 1, heightTiles: 1, name: character.name || 'Personagem',
-        color: '#d87054', opacity: state.opacity
+        color: '#d87054', opacity: state.opacity, layerId: state.activeLayerId || 'layer-1'
       };
       character.linkedTokenId = token.id;
       state.tokens.push(token);
@@ -373,7 +380,7 @@
     if (!position) { showToast('Não há espaço livre no mapa para criar o token.'); return false; }
     const token = {
       id: crypto.randomUUID(), ...position, widthTiles: 1, heightTiles: 1, name: character.name || 'Personagem',
-      color: '#d87054', opacity: state.opacity
+      color: '#d87054', opacity: state.opacity, layerId: state.activeLayerId || 'layer-1'
     };
     character.linkedTokenId = token.id;
     state.health.characters.push(character);
@@ -415,6 +422,115 @@
     for (const connection of connections.values()) {
       if (connection.open) connection.send(message);
     }
+  }
+
+  function isRoomAdmin() { return hostMode || roomRole === 'admin'; }
+
+  function canPlanToken(token) {
+    if (!token) return false;
+    if (isRoomAdmin()) return true;
+    return Boolean(peer && roomRole === 'player' && String(localMemberTokenId) === String(token.id) && String(state.initiative.activeTokenId) === String(token.id));
+  }
+
+  function setPlannedMove(token, destination) {
+    if (!canPlanToken(token)) {
+      showToast('Esse token só pode ser movido por um admin ou por seu jogador no próprio turno.');
+      return false;
+    }
+    if (!pointInsideMap(destination) || constructionBlocksRoute(token, destination)) {
+      showToast('Uma construção bloqueia essa rota ou o destino está fora do mapa.');
+      return false;
+    }
+    plannedMove = { tokenId: token.id, x: destination.x, y: destination.y };
+    movementRoute = { start: { x: token.x, y: token.y }, end: { x: destination.x, y: destination.y } };
+    drawMapScene(canvas.clientWidth, canvas.clientHeight);
+    drawDragReadout();
+    updateInspectorSelection();
+    return true;
+  }
+
+  function clearPlannedMove() {
+    plannedMove = null;
+    pendingTokenMove = null;
+    movementRoute = null;
+    dragReadout = null;
+    render();
+  }
+
+  function confirmPlannedMove() {
+    const token = state.tokens.find(item => String(item.id) === String(plannedMove?.tokenId));
+    if (!token || !canPlanToken(token)) { clearPlannedMove(); return; }
+    const destination = { x: plannedMove.x, y: plannedMove.y };
+    if (!pointInsideMap(destination) || constructionBlocksRoute(token, destination)) {
+      showToast('A rota não é mais válida.');
+      clearPlannedMove();
+      return;
+    }
+    if (peer && !hostMode && connections.has('host')) {
+      connections.get('host').send({ type: 'move-token', tokenId: token.id, x: destination.x, y: destination.y });
+      clearPlannedMove();
+      showToast('Movimento enviado à sala.');
+      return;
+    }
+    const from = objectGeometry(visualObject(token));
+    token.x = destination.x;
+    token.y = destination.y;
+    animateObjectFrom(token, from);
+    clearPlannedMove();
+    broadcastState();
+  }
+
+  function planTokenStep(dx, dy, distance = 1) {
+    const token = state.tokens.find(item => String(item.id) === String(selectedId));
+    if (!token || !canPlanToken(token)) return false;
+    const start = plannedMove?.tokenId === token.id ? { x: plannedMove.x, y: plannedMove.y } : { x: token.x, y: token.y };
+    return setPlannedMove(token, { x: start.x + dx * GRID * distance, y: start.y + dy * GRID * distance });
+  }
+
+  function receiveMoveRequest(message, connectionId) {
+    const member = roomMembers.get(connectionId);
+    const token = state.tokens.find(item => String(item.id) === String(message.tokenId));
+    const isAdminRequest = member?.role === 'admin';
+    const isPlayerRequest = member?.role === 'player' && String(member.tokenId || '') === String(message.tokenId) && String(state.initiative.activeTokenId || '') === String(message.tokenId);
+    const destination = { x: snapCellCenter(Number(message.x)), y: snapCellCenter(Number(message.y)) };
+    if ((!isAdminRequest && !isPlayerRequest) || !token || !Number.isFinite(destination.x) || !Number.isFinite(destination.y) ||
+      !pointInsideMap(destination) || constructionBlocksRoute(token, destination)) return;
+    const from = objectGeometry(visualObject(token));
+    token.x = snapCellCenter(destination.x);
+    token.y = snapCellCenter(destination.y);
+    animateObjectFrom(token, from);
+    broadcastState();
+  }
+
+  function broadcastRoomMembers(targetConnection = null) {
+    const members = [...roomMembers.entries()].map(([id, member]) => ({ id, role: member.role, tokenId: member.tokenId || null }));
+    const message = { type: 'room-members', members };
+    if (targetConnection?.open) targetConnection.send(message);
+    else if (hostMode) broadcast(message);
+  }
+
+  function applyRoomMemberUpdate(message, connectionId) {
+    if (!hostMode) {
+      if (roomRole === 'admin' && connections.get('host')?.open) connections.get('host').send({ type: 'member-update', memberId: message.memberId, role: message.role, tokenId: message.tokenId });
+      return;
+    }
+    const sender = roomMembers.get(connectionId);
+    if (connectionId !== 'local-admin' && (!sender || sender.role !== 'admin')) return;
+    const target = roomMembers.get(String(message.memberId || ''));
+    if (!target) return;
+    if (message.role === 'admin' || message.role === 'player') target.role = message.role;
+    const tokenExists = state.tokens.some(token => String(token.id) === String(message.tokenId || ''));
+    target.tokenId = tokenExists ? String(message.tokenId) : null;
+    const targetConnection = connections.get(String(message.memberId));
+    if (targetConnection?.open) targetConnection.send({ type: 'room-session', role: target.role, tokenId: target.tokenId });
+    broadcastRoomMembers();
+    updatePlayers();
+  }
+
+  function renderRoomMembers(members) {
+    roomMembers.clear();
+    for (const member of members) if (member?.id) roomMembers.set(String(member.id), { role: member.role === 'admin' ? 'admin' : 'player', tokenId: member.tokenId || null });
+    updatePlayers();
   }
 
   function publishDiceRoll(roll) {
@@ -650,18 +766,29 @@
     const cells = gridCellRoute(movementRoute.start, movementRoute.end);
     if (cells.length < 2) return;
     context.save();
-    context.strokeStyle = '#c1d48add';
-    context.fillStyle = '#c1d48add';
-    context.lineWidth = 3 / zoom;
-    context.setLineDash([7 / zoom, 5 / zoom]);
-    context.beginPath();
-    context.moveTo(cells[0].x, cells[0].y);
-    for (const cell of cells.slice(1)) context.lineTo(cell.x, cell.y);
-    context.stroke();
-    context.setLineDash([]);
-    context.beginPath();
-    context.arc(movementRoute.end.x, movementRoute.end.y, 5 / zoom, 0, Math.PI * 2);
-    context.fill();
+    cells.forEach((cell, index) => {
+      const left = cell.x - GRID / 2;
+      const top = cell.y - GRID / 2;
+      context.fillStyle = index === 0 ? '#c1d48a24' : '#c1d48a42';
+      context.fillRect(left, top, GRID, GRID);
+      context.strokeStyle = '#c1d48add';
+      context.lineWidth = 2 / zoom;
+      context.strokeRect(left + 2 / zoom, top + 2 / zoom, GRID - 4 / zoom, GRID - 4 / zoom);
+      const badgeX = left + 13 / zoom;
+      const badgeY = top + 13 / zoom;
+      context.beginPath();
+      context.arc(badgeX, badgeY, 9 / zoom, 0, Math.PI * 2);
+      context.fillStyle = '#20261def';
+      context.fill();
+      context.strokeStyle = '#d9e7ae';
+      context.lineWidth = 1 / zoom;
+      context.stroke();
+      context.fillStyle = '#f2f5e8';
+      context.font = `700 ${10 / zoom}px "DM Mono", Consolas, monospace`;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(index === 0 ? 'S' : String(index), badgeX, badgeY + 0.5 / zoom);
+    });
     context.restore();
   }
 
@@ -1405,6 +1532,7 @@
     context.scale(zoom, zoom);
     const visibleLeft = (-width / 2 - panX) / zoom;
     const visibleTop = (-height / 2 - panY) / zoom;
+    const visibleBounds = { left: visibleLeft, top: visibleTop, right: visibleLeft + width / zoom, bottom: visibleTop + height / zoom };
     const boardPath = mapPath();
     context.fillStyle = '#111512c9';
     context.fillRect(visibleLeft, visibleTop, width / zoom, height / zoom);
@@ -1413,13 +1541,12 @@
     context.save();
     context.clip(boardPath);
     if (gridVisible) drawGrid(width, height);
-    for (const tile of state.tiles) drawTile(visualObject(tile));
-    for (const shape of state.shapes) drawShape(visualObject(shape));
+    const layers = Array.isArray(state.layers) && state.layers.length ? state.layers : [{ id: 'layer-1', name: 'Camada 1' }];
+    for (const layer of layers) drawLayerContents(layer.id, visibleBounds);
     if (currentShape) drawShape(currentShape, true);
     if (linePreview) drawShape(linePreview, true);
-    drawMovementRoute();
-    for (const token of state.tokens) drawToken(visualObject(token));
     if (currentToken) drawToken(visualObject(currentToken), true);
+    drawMovementRoute();
     drawLocatedTokenMarker();
     drawProjectileLayer();
     drawAimIndicator();
@@ -1448,6 +1575,55 @@
     context.restore();
   }
 
+  function groupItemsByLayer(collection, fallbackLayerId = null) {
+    const grouped = new Map();
+    const defaultLayerId = String(fallbackLayerId ?? state.activeLayerId ?? 'layer-1');
+    for (const item of collection) {
+      const layerId = String(item?.layerId ?? defaultLayerId);
+      if (!grouped.has(layerId)) grouped.set(layerId, []);
+      grouped.get(layerId).push(item);
+    }
+    return grouped;
+  }
+
+  function isWorldObjectVisible(object, bounds) {
+    if (!object || !bounds) return true;
+    if (object.kind === 'stroke' || object.kind === 'line' || object.kind === 'circle' || object.kind === 'square') {
+      const box = shapeBounds(object);
+      return box.x <= bounds.right && box.x + box.width >= bounds.left && box.y <= bounds.bottom && box.y + box.height >= bounds.top;
+    }
+    if (object.x == null || object.y == null) return true;
+    if (object.level != null) {
+      const depth = Number(object.level || 0) * GRID;
+      const offset = depth * 0.36;
+      const half = GRID / 2;
+      const left = object.x - half;
+      const top = object.y - half;
+      const right = object.x + half + offset;
+      const bottom = object.y + half + depth;
+      return left <= bounds.right && right >= bounds.left && top <= bounds.bottom && bottom >= bounds.top;
+    }
+    if (object.widthTiles != null || object.heightTiles != null) {
+      const dimensions = tokenDimensions(object);
+      const left = object.x - dimensions.width / 2;
+      const top = object.y - dimensions.height / 2;
+      return left <= bounds.right && left + dimensions.width >= bounds.left && top <= bounds.bottom && top + dimensions.height >= bounds.top;
+    }
+    const half = GRID / 2;
+    return object.x + half >= bounds.left && object.x - half <= bounds.right && object.y + half >= bounds.top && object.y - half <= bounds.bottom;
+  }
+
+  let renderQueued = false;
+
+  function requestRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    window.requestAnimationFrame(() => {
+      renderQueued = false;
+      render();
+    });
+  }
+
   function render() {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
@@ -1457,9 +1633,10 @@
     updateOpacityControl();
     updateMapControls();
     updateInitiativePanel();
+    updateLayerControls();
     updateObjectCount();
     updateInspectorSelection();
-    document.querySelector('#canvasHint').classList.toggle('hidden', state.tokens.length + state.tiles.length + state.shapes.length > 0);
+    document.querySelector('#canvasHint').classList.toggle('hidden', state.tokens.length + state.tiles.length + state.shapes.length + state.elevation.length > 0);
     updateMagnifier();
   }
 
@@ -1545,6 +1722,39 @@
     context.strokeRect(tile.x - half, tile.y - half, GRID, GRID);
     context.restore();
     if (selectedIds.has(tile.id)) drawSelection(tile.x, tile.y, GRID, GRID);
+  }
+
+  function drawElevation() {
+    if (!state.elevation.length) return;
+    const cells = [...state.elevation].sort((first, second) => first.y - second.y || first.x - second.x);
+    const half = GRID / 2;
+    for (const cell of cells) {
+      const depth = cell.level * GRID;
+      const offset = depth * 0.36;
+      context.save();
+      context.fillStyle = '#394a3a';
+      context.beginPath();
+      context.moveTo(cell.x - half, cell.y + half);
+      context.lineTo(cell.x + half, cell.y + half);
+      context.lineTo(cell.x + half + offset, cell.y + half + depth);
+      context.lineTo(cell.x - half + offset, cell.y + half + depth);
+      context.closePath();
+      context.fill();
+      context.fillStyle = '#2d392f';
+      context.beginPath();
+      context.moveTo(cell.x + half, cell.y - half);
+      context.lineTo(cell.x + half + offset, cell.y - half + depth);
+      context.lineTo(cell.x + half + offset, cell.y + half + depth);
+      context.lineTo(cell.x + half, cell.y + half);
+      context.closePath();
+      context.fill();
+      context.fillStyle = '#748d65';
+      context.fillRect(cell.x - half, cell.y - half, GRID, GRID);
+      context.strokeStyle = '#b1c89a';
+      context.lineWidth = 1.5 / zoom;
+      context.strokeRect(cell.x - half, cell.y - half, GRID, GRID);
+      context.restore();
+    }
   }
 
   function drawShape(shape, preview = false) {
@@ -1908,13 +2118,14 @@
   }
 
   function setTool(nextTool) {
+    if (!isRoomAdmin() && nextTool !== 'select') nextTool = 'select';
     if (nextTool !== 'straight-line') {
       pendingLineStart = null;
       linePreview = null;
       dragReadout = null;
     }
     if (nextTool !== 'projectile') { pendingProjectileStart = null; projectilePreview = null; }
-    if (nextTool !== 'select') { pendingTokenMove = null; movementRoute = null; }
+    if (nextTool !== 'select') { pendingTokenMove = null; plannedMove = null; movementRoute = null; }
     tool = nextTool;
     document.querySelectorAll('.tool-button[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
     canvas.className = `tool-${tool}`;
@@ -1922,9 +2133,9 @@
     document.querySelector('#selectionOptions').style.display = tool === 'select' ? 'flex' : 'none';
     document.querySelector('#colorOptions').hidden = !['line', 'straight-line', 'circle', 'square'].includes(tool);
     document.querySelector('#tokenOptions').hidden = tool !== 'token';
+    document.querySelector('#elevationOptions').hidden = tool !== 'elevation';
     document.querySelector('#locateOptions').hidden = tool !== 'locate';
     document.querySelector('#projectileOptions').hidden = tool !== 'projectile';
-    document.querySelector('#tileOptions').hidden = tool !== 'tile';
   }
 
   function snap(value) { return Math.round(value / GRID) * GRID; }
@@ -1960,27 +2171,47 @@
   function alignStateToGrid(mapState) {
     const coordinate = value => Number.isFinite(Number(value)) ? Number(value) : 0;
     const defaultOpacity = clampOpacity(mapState.opacity);
+    const layers = [];
+    const layerIds = new Set();
+    for (const [index, layer] of (Array.isArray(mapState.layers) ? mapState.layers : []).entries()) {
+      const id = String(layer?.id || '');
+      if (!id || layerIds.has(id)) continue;
+      layerIds.add(id);
+      layers.push({ id, name: String(layer.name || `Camada ${index + 1}`).trim().slice(0, 32) || `Camada ${index + 1}` });
+    }
+    if (!layers.length) layers.push({ id: 'layer-1', name: 'Camada 1' });
+    const validLayerIds = new Set(layers.map(layer => layer.id));
+    const activeLayerId = validLayerIds.has(String(mapState.activeLayerId || '')) ? String(mapState.activeLayerId) : layers[0].id;
+    const withLayer = item => ({ ...item, layerId: validLayerIds.has(String(item.layerId || '')) ? String(item.layerId) : activeLayerId });
     return {
       ...mapState,
+      layers,
+      activeLayerId,
       health: mapState.health && Array.isArray(mapState.health.characters) ? mapState.health : defaultHealthState(),
       gridVisible: mapState.gridVisible !== false,
       opacity: defaultOpacity,
+      elevation: (Array.isArray(mapState.elevation) ? mapState.elevation : []).map(cell => ({
+        ...withLayer(cell),
+        x: snapCellCenter(coordinate(cell.x)),
+        y: snapCellCenter(coordinate(cell.y)),
+        level: Math.round(Math.max(0.25, Math.min(MAX_ELEVATION_TILES, Number(cell.level) || 0.25)) * 4) / 4
+      })),
       map: normalizeMapConfig(mapState.map),
       initiative: normalizeInitiative(mapState.initiative, mapState.tokens),
-      tokens: mapState.tokens.map(token => ({ ...token, widthTiles: tokenTileCount(token.widthTiles, token.radius), heightTiles: tokenTileCount(token.heightTiles, token.radius), opacity: clampOpacity(token.opacity, defaultOpacity), x: snapCellCenter(coordinate(token.x)), y: snapCellCenter(coordinate(token.y)) })),
-      tiles: mapState.tiles.map(tile => ({ ...tile, opacity: clampOpacity(tile.opacity, defaultOpacity), x: snapCellCenter(coordinate(tile.x)), y: snapCellCenter(coordinate(tile.y)) })),
+      tokens: mapState.tokens.map(token => ({ ...withLayer(token), widthTiles: tokenTileCount(token.widthTiles, token.radius), heightTiles: tokenTileCount(token.heightTiles, token.radius), opacity: clampOpacity(token.opacity, defaultOpacity), x: snapCellCenter(coordinate(token.x)), y: snapCellCenter(coordinate(token.y)) })),
+      tiles: mapState.tiles.map(tile => ({ ...withLayer(tile), opacity: clampOpacity(tile.opacity, defaultOpacity), x: snapCellCenter(coordinate(tile.x)), y: snapCellCenter(coordinate(tile.y)) })),
       shapes: mapState.shapes.map(shape => {
         if (shape.kind === 'stroke') {
           const points = Array.isArray(shape.points) ? shape.points : [];
           return {
-            ...shape,
+            ...withLayer(shape),
             points: points.map(point => ({ x: snapCellCenter(coordinate(point.x)), y: snapCellCenter(coordinate(point.y)) })),
             opacity: clampOpacity(shape.opacity, defaultOpacity)
           };
         }
         const align = shape.kind === 'line' ? snapCellCenter : snap;
         return {
-          ...shape,
+          ...withLayer(shape),
           filled: shape.kind === 'circle' || shape.kind === 'square' ? true : shape.filled,
           opacity: clampOpacity(shape.opacity, defaultOpacity),
           x1: align(coordinate(shape.x1)), y1: align(coordinate(shape.y1)),
@@ -1988,6 +2219,151 @@
         };
       })
     };
+  }
+
+  function addLayer() {
+    if (!isRoomAdmin()) {
+      showToast('Apenas o administrador pode alterar camadas.');
+      return null;
+    }
+    const baseName = `Camada ${state.layers.length + 1}`;
+    const layerId = `layer-${crypto.randomUUID().slice(0, 8)}`;
+    state.layers.push({ id: layerId, name: baseName });
+    state.activeLayerId = layerId;
+    broadcastState();
+    render();
+    return layerId;
+  }
+
+  function moveLayer(layerId, direction) {
+    if (!isRoomAdmin()) {
+      showToast('Apenas o administrador pode reorganizar camadas.');
+      return;
+    }
+    const index = state.layers.findIndex(layer => String(layer.id) === String(layerId));
+    if (index < 0) return;
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= state.layers.length) return;
+    [state.layers[index], state.layers[targetIndex]] = [state.layers[targetIndex], state.layers[index]];
+    broadcastState();
+  }
+
+  function removeLayer(layerId) {
+    if (!isRoomAdmin()) {
+      showToast('Apenas o administrador pode remover camadas.');
+      return;
+    }
+    if (state.layers.length <= 1) return;
+    const index = state.layers.findIndex(layer => String(layer.id) === String(layerId));
+    if (index < 0) return;
+    const nextLayer = state.layers[index === 0 ? 1 : index - 1];
+    const nextLayerId = nextLayer?.id || state.layers[0].id;
+    for (const collection of [state.tiles, state.shapes, state.tokens, state.elevation]) {
+      for (const item of collection) {
+        if (item.layerId === layerId) item.layerId = nextLayerId;
+      }
+    }
+    state.layers.splice(index, 1);
+    if (state.activeLayerId === layerId) state.activeLayerId = nextLayerId;
+    broadcastState();
+  }
+
+  function updateLayerControls() {
+    const activeName = document.querySelector('#activeLayerName');
+    const layerList = document.querySelector('#layerList');
+    if (!activeName || !layerList) return;
+    const layers = Array.isArray(state.layers) && state.layers.length ? state.layers : [{ id: 'layer-1', name: 'Camada 1' }];
+    const activeLayer = layers.find(layer => String(layer.id) === String(state.activeLayerId)) || layers[0];
+    const activeLabel = activeLayer?.name || 'Camada 1';
+    const signature = JSON.stringify(layers.map((layer, index) => [
+      String(layer.id),
+      String(layer.name || `Camada ${index + 1}`),
+      String(layer.id) === String(activeLayer.id),
+      index === 0,
+      index === layers.length - 1,
+      layers.length
+    ]));
+    activeName.textContent = activeLabel;
+    if (signature === layerUiSignature) return;
+    layerUiSignature = signature;
+    layerList.innerHTML = layers.map((layer, index) => {
+      const isActive = String(layer.id) === String(activeLayer.id);
+      return `
+        <div class="layer-row ${isActive ? 'active' : ''}">
+          <button class="layer-select" type="button" data-layer-action="select" data-layer-id="${layer.id}" ${isActive ? 'disabled' : ''}>
+            <span class="layer-eye" aria-hidden="true">${isActive ? '●' : '○'}</span>
+            <span class="layer-name">${layer.name}</span>
+            ${isActive ? '<span class="layer-current">ATUAL</span>' : ''}
+          </button>
+          <button class="layer-order" type="button" data-layer-action="up" data-layer-id="${layer.id}" aria-label="Mover para cima" ${index === 0 ? 'disabled' : ''}>▲</button>
+          <button class="layer-order" type="button" data-layer-action="down" data-layer-id="${layer.id}" aria-label="Mover para baixo" ${index === layers.length - 1 ? 'disabled' : ''}>▼</button>
+          <button class="layer-remove" type="button" data-layer-action="delete" data-layer-id="${layer.id}" aria-label="Excluir camada" ${layers.length === 1 ? 'disabled' : ''}>×</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function drawLayerContents(layerId, visibleBounds = null) {
+    const layers = state.layers || [{ id: 'layer-1', name: 'Camada 1' }];
+    const activeIndex = layers.findIndex(layer => String(layer.id) === String(state.activeLayerId));
+    const layerIndex = layers.findIndex(layer => String(layer.id) === String(layerId));
+    const isActive = layerId === state.activeLayerId;
+    const distance = activeIndex >= 0 && layerIndex >= 0 ? Math.abs(activeIndex - layerIndex) : 0;
+    const alpha = isActive ? 1 : Math.max(0.52, 0.94 - distance * 0.12);
+    const dimAlpha = isActive ? 0 : Math.min(0.2, 0.08 + distance * 0.045);
+    const tilesByLayer = groupItemsByLayer(state.tiles, state.activeLayerId);
+    const shapesByLayer = groupItemsByLayer(state.shapes, state.activeLayerId);
+    const tokensByLayer = groupItemsByLayer(state.tokens, state.activeLayerId);
+    const elevationByLayer = groupItemsByLayer(state.elevation, state.activeLayerId);
+    const layerKey = String(layerId);
+
+    context.save();
+    context.globalAlpha = alpha;
+    if (!isActive) {
+      const bounds = mapWorldBounds();
+      context.fillStyle = `rgba(10, 14, 12, ${dimAlpha})`;
+      context.fillRect(bounds.left, bounds.top, bounds.width, bounds.height);
+    }
+    for (const tile of tilesByLayer.get(layerKey) || []) {
+      if (visibleBounds && !isWorldObjectVisible(tile, visibleBounds)) continue;
+      drawTile(visualObject(tile));
+    }
+    for (const shape of shapesByLayer.get(layerKey) || []) {
+      if (visibleBounds && !isWorldObjectVisible(shape, visibleBounds)) continue;
+      drawShape(visualObject(shape));
+    }
+    for (const token of tokensByLayer.get(layerKey) || []) {
+      if (visibleBounds && !isWorldObjectVisible(token, visibleBounds)) continue;
+      drawToken(visualObject(token));
+    }
+    for (const cell of elevationByLayer.get(layerKey) || []) {
+      if (visibleBounds && !isWorldObjectVisible(cell, visibleBounds)) continue;
+      const depth = cell.level * GRID;
+      const offset = depth * 0.36;
+      const half = GRID / 2;
+      context.fillStyle = '#394a3a';
+      context.beginPath();
+      context.moveTo(cell.x - half, cell.y + half);
+      context.lineTo(cell.x + half, cell.y + half);
+      context.lineTo(cell.x + half + offset, cell.y + half + depth);
+      context.lineTo(cell.x - half + offset, cell.y + half + depth);
+      context.closePath();
+      context.fill();
+      context.fillStyle = '#2d392f';
+      context.beginPath();
+      context.moveTo(cell.x + half, cell.y - half);
+      context.lineTo(cell.x + half + offset, cell.y - half + depth);
+      context.lineTo(cell.x + half + offset, cell.y + half + depth);
+      context.lineTo(cell.x + half, cell.y + half);
+      context.closePath();
+      context.fill();
+      context.fillStyle = '#748d65';
+      context.fillRect(cell.x - half, cell.y - half, GRID, GRID);
+      context.strokeStyle = '#b1c89a';
+      context.lineWidth = 1.5 / zoom;
+      context.strokeRect(cell.x - half, cell.y - half, GRID, GRID);
+    }
+    context.restore();
   }
 
   function normalizeInitiative(value, tokens) {
@@ -2096,18 +2472,14 @@
     };
   }
 
-  function paintTile(point) {
-    const x = snapCellCenter(point.x), y = snapCellCenter(point.y);
-    if (!pointInsideMap({ x, y })) return;
-    const existing = state.tiles.findIndex(tile => tile.x === x && tile.y === y);
-    if (tileType === 'erase') {
-      if (existing >= 0) state.tiles.splice(existing, 1);
-    } else {
-      const tile = { id: existing >= 0 ? state.tiles[existing].id : crypto.randomUUID(), x, y, kind: tileType, opacity: state.opacity };
-      if (existing >= 0) state.tiles[existing] = tile;
-      else state.tiles.push(tile);
+  function onDoubleClick(event) {
+    if (tool !== 'select' || !plannedMove) return;
+    const point = screenToWorld(pointerPosition(event));
+    const destination = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
+    if (plannedMove.x === destination.x && plannedMove.y === destination.y) {
+      event.preventDefault();
+      confirmPlannedMove();
     }
-    broadcastState();
   }
 
   function onPointerDown(event) {
@@ -2129,7 +2501,7 @@
         linePreview = { id: 'line-preview', kind: 'line', x1: endpoint.x, y1: endpoint.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity };
         dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(linePreview) };
       } else {
-        const line = { id: crypto.randomUUID(), kind: 'line', x1: pendingLineStart.x, y1: pendingLineStart.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, ...drawingShapeMetadata() };
+        const line = { id: crypto.randomUUID(), kind: 'line', x1: pendingLineStart.x, y1: pendingLineStart.y, x2: endpoint.x, y2: endpoint.y, color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, layerId: state.activeLayerId || 'layer-1', ...drawingShapeMetadata() };
         state.shapes.push(line);
         setSelection([line.id], line.id);
         pendingLineStart = null;
@@ -2146,17 +2518,10 @@
       if (token) {
         const destination = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
         if (!pointInsideMap(destination)) return;
-        if (constructionBlocksRoute(token, destination)) { showToast('Uma construção bloqueia essa rota.'); return; }
-        const from = objectGeometry(visualObject(token));
-        token.x = destination.x;
-        token.y = destination.y;
-        animateObjectFrom(token, from);
-        setSelection([token.id], token.id);
+        if (!setPlannedMove(token, destination)) return;
       }
       pendingTokenMove = null;
-      movementRoute = null;
-      dragReadout = null;
-      broadcastState();
+      updateInspectorSelection();
       return;
     }
     if (tool === 'locate') {
@@ -2192,24 +2557,34 @@
       }
       return;
     }
+    if (tool === 'elevation') {
+      const x = snapCellCenter(point.x);
+      const y = snapCellCenter(point.y);
+      const index = state.elevation.findIndex(cell => cell.x === x && cell.y === y);
+      if (elevationLevel === 0) {
+        if (index >= 0) state.elevation.splice(index, 1);
+      } else if (index >= 0) state.elevation[index].level = elevationLevel;
+      else state.elevation.push({ x, y, level: elevationLevel, layerId: state.activeLayerId || 'layer-1' });
+      broadcastState();
+      return;
+    }
     activePointer = event.pointerId;
     canvas.setPointerCapture(event.pointerId);
     if (tool === 'token') {
       const position = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
       if (!pointInsideMap(position)) return;
       if (constructionBlocksPoint(position)) { showToast('Não é possível posicionar um token dentro de uma construção.'); return; }
-      currentToken = { id: crypto.randomUUID(), ...position, widthTiles: tokenTileCount(document.querySelector('#tokenWidth').value), heightTiles: tokenTileCount(document.querySelector('#tokenHeight').value), name: document.querySelector('#tokenName').value.trim() || 'Token', color: document.querySelector('#tokenColor').value, opacity: state.opacity };
+      currentToken = { id: crypto.randomUUID(), ...position, widthTiles: tokenTileCount(document.querySelector('#tokenWidth').value), heightTiles: tokenTileCount(document.querySelector('#tokenHeight').value), name: document.querySelector('#tokenName').value.trim() || 'Token', color: document.querySelector('#tokenColor').value, opacity: state.opacity, layerId: state.activeLayerId || 'layer-1' };
       dragReadout = { x: screen.x, y: screen.y, startX: point.x, startY: point.y, text: '0 tiles' };
       render(); return;
     }
-    if (tool === 'tile') { lastPaintCell = `${snapCellCenter(point.x)}:${snapCellCenter(point.y)}`; paintTile(point); return; }
     if (['line', 'circle', 'square'].includes(tool)) {
       const align = tool === 'line' ? snapCellCenter : snap;
       const x = align(point.x), y = align(point.y);
       if (!pointInsideMap({ x, y })) return;
       currentShape = tool === 'line'
-        ? { id: crypto.randomUUID(), kind: 'stroke', points: [{ x, y }], color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, ...drawingShapeMetadata() }
-        : { id: crypto.randomUUID(), kind: tool, x1: x, y1: y, x2: x, y2: y, color: document.querySelector('#drawColor').value, filled: true, opacity: state.opacity, ...drawingShapeMetadata() };
+        ? { id: crypto.randomUUID(), kind: 'stroke', points: [{ x, y }], color: document.querySelector('#drawColor').value, width: GRID, opacity: state.opacity, layerId: state.activeLayerId || 'layer-1', ...drawingShapeMetadata() }
+        : { id: crypto.randomUUID(), kind: tool, x1: x, y1: y, x2: x, y2: y, color: document.querySelector('#drawColor').value, filled: true, opacity: state.opacity, layerId: state.activeLayerId || 'layer-1', ...drawingShapeMetadata() };
       dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(currentShape) };
       render(); return;
     }
@@ -2220,6 +2595,7 @@
         if (next.has(found.id)) next.delete(found.id); else next.add(found.id);
         setSelection(next, found.id);
       } else if (!selectedIds.has(found.id)) setSelection([found.id], found.id);
+      if (!canPlanToken(found)) { render(); return; }
       dragToken = { id: found.id, offsetX: point.x - found.x, offsetY: point.y - found.y, startX: found.x, startY: found.y, didMove: false };
       movementRoute = { start: { x: found.x, y: found.y }, end: { x: found.x, y: found.y } };
       dragReadout = { x: screen.x, y: screen.y, text: '0 tiles' };
@@ -2251,17 +2627,19 @@
     aimWorld = aimPointFor(point);
     if (magnifierMode !== 0) updateMagnifier();
     document.querySelector('#coordinates').textContent = `X ${String(Math.round(point.x)).padStart(3, '0')} · Y ${String(Math.round(point.y)).padStart(3, '0')}`;
+    const shouldRenderForInteraction = panPointer?.id === event.pointerId || selectionBox && activePointer === event.pointerId || currentShape || currentToken || dragToken || pendingLineStart || pendingProjectileStart || pendingTokenMove;
+    if (!shouldRenderForInteraction) return;
     if (panPointer && panPointer.id === event.pointerId) {
       panX = panPointer.panX + screen.x - panPointer.x;
       panY = panPointer.panY + screen.y - panPointer.y;
-      render(); return;
+      requestRender(); return;
     }
     if (selectionBox && activePointer === event.pointerId) {
       selectionBox.x = screen.x;
       selectionBox.y = screen.y;
-      render(); return;
+      requestRender(); return;
     }
-    if (!pointInsideMap(point)) { render(); return; }
+    if (!pointInsideMap(point)) { requestRender(); return; }
     if (activePointer !== event.pointerId) {
       if (tool === 'straight-line' && pendingLineStart) {
         const endpoint = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
@@ -2286,54 +2664,50 @@
           dragReadout = { x: screen.x, y: screen.y, text: `${movedX >= 0 ? '+' : ''}${movedX}, ${movedY >= 0 ? '+' : ''}${movedY} tiles` };
         }
       }
-      render(); return;
-    }
-    if (tool === 'tile' && (event.buttons & 1)) {
-      const cell = `${snapCellCenter(point.x)}:${snapCellCenter(point.y)}`;
-      if (cell !== lastPaintCell) { lastPaintCell = cell; paintTile(point); }
-      return;
+      requestRender(); return;
     }
     if (currentShape) {
       if (currentShape.kind === 'stroke') {
         const endpoint = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
-        if (!pointInsideMap(endpoint)) { render(); return; }
+        if (!pointInsideMap(endpoint)) { requestRender(); return; }
         const previous = currentShape.points[currentShape.points.length - 1];
         currentShape.points.push(...gridCellRoute(previous, endpoint).slice(1).filter(cell => pointInsideMap(cell)));
       } else {
         const endpoint = { x: snap(point.x), y: snap(point.y) };
-        if (!pointInsideMap(endpoint)) { render(); return; }
+        if (!pointInsideMap(endpoint)) { requestRender(); return; }
         currentShape.x2 = endpoint.x; currentShape.y2 = endpoint.y;
       }
       dragReadout = { x: screen.x, y: screen.y, text: shapeTileReadout(currentShape) };
-      render(); return;
+      requestRender(); return;
     }
     if (currentToken) {
       const from = objectGeometry(visualObject(currentToken));
       const destination = { x: snapCellCenter(point.x), y: snapCellCenter(point.y) };
-      if (!pointInsideMap(destination)) { render(); return; }
+      if (!pointInsideMap(destination)) { requestRender(); return; }
       currentToken.x = destination.x;
       currentToken.y = destination.y;
       animateObjectFrom(currentToken, from, 100);
       const movedX = Math.round((currentToken.x - snapCellCenter(dragReadout.startX)) / GRID);
       const movedY = Math.round((currentToken.y - snapCellCenter(dragReadout.startY)) / GRID);
       dragReadout = { ...dragReadout, x: screen.x, y: screen.y, text: `${movedX >= 0 ? '+' : ''}${movedX}, ${movedY >= 0 ? '+' : ''}${movedY} tiles` };
-      render(); return;
+      requestRender(); return;
     }
     if (dragToken && !dragToken.shape) {
       const item = dragToken.tile ? state.tiles.find(candidate => candidate.id === dragToken.id) : state.tokens.find(candidate => candidate.id === dragToken.id);
       if (item) {
-        const from = objectGeometry(visualObject(item));
         const destination = { x: snapCellCenter(point.x - dragToken.offsetX), y: snapCellCenter(point.y - dragToken.offsetY) };
-        if (!pointInsideMap(destination)) { render(); return; }
-        if (!dragToken.tile && constructionBlocksRoute({ x: dragToken.startX, y: dragToken.startY }, destination)) { render(); return; }
-        item.x = destination.x; item.y = destination.y;
-        dragToken.didMove = item.x !== dragToken.startX || item.y !== dragToken.startY;
-        if (!dragToken.tile && movementRoute) movementRoute.end = { x: item.x, y: item.y };
-        animateObjectFrom(item, from, 100);
-        const movedX = Math.round((item.x - dragToken.startX) / GRID);
-        const movedY = Math.round((item.y - dragToken.startY) / GRID);
+        if (!pointInsideMap(destination)) { requestRender(); return; }
+        if (dragToken.tile) {
+          item.x = destination.x; item.y = destination.y;
+        } else {
+          if (constructionBlocksRoute(item, destination)) { requestRender(); return; }
+          if (movementRoute) movementRoute.end = { x: destination.x, y: destination.y };
+        }
+        dragToken.didMove = destination.x !== dragToken.startX || destination.y !== dragToken.startY;
+        const movedX = Math.round((destination.x - dragToken.startX) / GRID);
+        const movedY = Math.round((destination.y - dragToken.startY) / GRID);
         dragReadout = { x: screen.x, y: screen.y, text: `${movedX >= 0 ? '+' : ''}${movedX}, ${movedY >= 0 ? '+' : ''}${movedY} tiles` };
-        render();
+        requestRender();
       }
       return;
     }
@@ -2345,7 +2719,7 @@
         const movedShape = shape.kind === 'stroke'
           ? { ...shape, points: dragToken.points.map(cell => ({ x: cell.x + dx, y: cell.y + dy })) }
           : { ...shape, x1: dragToken.x1 + dx, x2: dragToken.x2 + dx, y1: dragToken.y1 + dy, y2: dragToken.y2 + dy };
-        if (!shapeFitsMap(movedShape)) { render(); return; }
+        if (!shapeFitsMap(movedShape)) { requestRender(); return; }
         if (shape.kind === 'stroke') shape.points = movedShape.points;
         else {
           shape.x1 = movedShape.x1; shape.x2 = movedShape.x2;
@@ -2353,7 +2727,7 @@
         }
         animateObjectFrom(shape, from, 100);
         dragReadout = { x: screen.x, y: screen.y, text: `${dx >= 0 ? '+' : ''}${dx / GRID}, ${dy >= 0 ? '+' : ''}${dy / GRID} tiles` };
-        render();
+        requestRender();
       }
     }
   }
@@ -2384,7 +2758,6 @@
       pendingTokenMove = null;
       dragReadout = null;
       movementRoute = null;
-      lastPaintCell = '';
       activePointer = null;
       if (panPointer?.id === event.pointerId) { panPointer = null; canvas.classList.remove('is-panning'); }
       render();
@@ -2418,6 +2791,14 @@
         movementRoute = { start: { x: dragToken.startX, y: dragToken.startY }, end: { x: dragToken.startX, y: dragToken.startY } };
         dragReadout = { x: pointerPosition(event).x, y: pointerPosition(event).y, text: '0, 0 tiles' };
         render();
+      } else if (!dragToken.shape && !dragToken.tile && movementRoute) {
+        const token = state.tokens.find(item => item.id === dragToken.id);
+        const destination = movementRoute.end;
+        plannedMove = { tokenId: dragToken.id, x: destination.x, y: destination.y };
+        dragReadout = { x: pointerPosition(event).x, y: pointerPosition(event).y, text: `${Math.round((destination.x - dragToken.startX) / GRID)}, ${Math.round((destination.y - dragToken.startY) / GRID)} tiles` };
+        if (token) setSelection([token.id], token.id);
+        updateInspectorSelection();
+        render();
       } else {
         dragReadout = null;
         movementRoute = null;
@@ -2425,7 +2806,6 @@
       }
     }
     dragToken = null;
-    lastPaintCell = '';
     activePointer = null;
   }
 
@@ -2447,7 +2827,7 @@
 
   function updateZoomLabel() { document.querySelector('#zoomReadout').textContent = `${Math.round(zoom * 100)}%`; }
   function updateObjectCount() {
-    const count = state.tokens.length + state.tiles.length + state.shapes.length;
+    const count = state.tokens.length + state.tiles.length + state.shapes.length + state.elevation.length;
     document.querySelector('#objectCount').textContent = `${count} ${count === 1 ? 'objeto' : 'objetos'} no mapa`;
   }
 
@@ -2624,6 +3004,16 @@
     const selected = selectedItems.find(item => item.id === selectedId) || selectedItems[0];
     const section = document.querySelector('#selectedSection');
     section.hidden = selectedItems.length === 0;
+    const movementControls = document.querySelector('#movementControls');
+    movementControls.hidden = selectedItems.length !== 1 || !state.tokens.includes(selected) || !canPlanToken(selected);
+    document.querySelector('#movementModeFree').setAttribute('aria-pressed', String(movementMode === 'free'));
+    document.querySelector('#movementModeAngles').setAttribute('aria-pressed', String(movementMode === 'angles'));
+    document.querySelector('#movementAngleControls').hidden = movementMode !== 'angles';
+    const currentPlan = plannedMove?.tokenId === selected?.id ? plannedMove : null;
+    document.querySelector('#movementStatus').textContent = currentPlan
+      ? `Destino marcado: ${Math.round((currentPlan.x - selected.x) / GRID)}, ${Math.round((currentPlan.y - selected.y) / GRID)} tiles. Confirme para mover.`
+      : movementMode === 'free' ? 'Use as setas ou WASD para marcar o trajeto.' : 'Escolha um dos oito ângulos e a distância.';
+    document.querySelector('#confirmMovement').disabled = !currentPlan || !canPlanToken(selected);
     const details = document.querySelector('#selectedDetails');
     if (!selectedItems.length) { details.replaceChildren(); return; }
     if (selectedItems.length > 1) {
@@ -2634,10 +3024,10 @@
     const label = selected.name || ({ line: 'Linha', circle: 'Círculo', square: 'Quadrado' }[selected.kind] || 'Tile');
     const selectedWidth = tokenTileCount(selected.widthTiles, selected.radius);
     const selectedHeight = tokenTileCount(selected.heightTiles, selected.radius);
-    const tokenSizeControl = state.tokens.includes(selected) ? `<div class="token-size-fields spacing-top"><label class="field-label" for="selectedTokenWidth">LARGURA (TILES)<input id="selectedTokenWidth" class="text-input map-number" type="number" min="1" step="1" value="${selectedWidth}"></label><label class="field-label" for="selectedTokenHeight">ALTURA (TILES)<input id="selectedTokenHeight" class="text-input map-number" type="number" min="1" step="1" value="${selectedHeight}"></label></div>` : '';
+    const tokenSizeControl = isRoomAdmin() && state.tokens.includes(selected) ? `<div class="token-size-fields spacing-top"><label class="field-label" for="selectedTokenWidth">LARGURA (TILES)<input id="selectedTokenWidth" class="text-input map-number" type="number" min="1" step="1" value="${selectedWidth}"></label><label class="field-label" for="selectedTokenHeight">ALTURA (TILES)<input id="selectedTokenHeight" class="text-input map-number" type="number" min="1" step="1" value="${selectedHeight}"></label></div>` : '';
     const shapeControls = state.shapes.includes(selected) ? `<div class="selected-shape-mode"><label class="field-label" for="selectedShapeMode">MODO</label><select class="text-input" id="selectedShapeMode" data-shape-field="mode"><option value="free" ${selected.mode !== 'construction' && selected.mode !== 'alert' ? 'selected' : ''}>Livre</option><option value="construction" ${selected.mode === 'construction' ? 'selected' : ''}>Construção · bloqueia</option><option value="alert" ${selected.mode === 'alert' ? 'selected' : ''}>Alerta · dano após turnos</option></select>${selected.mode === 'alert' ? `<label class="field-label spacing-top" for="selectedAlertTurns">TURNOS RESTANTES</label><input class="text-input" id="selectedAlertTurns" type="number" min="1" max="99" value="${Math.max(1, selected.alertTurnsRemaining || selected.alertTurnsTotal || 1)}" data-shape-field="alertTurnsRemaining"><label class="field-label spacing-top" for="selectedAlertDamage">DANO</label><input class="text-input" id="selectedAlertDamage" type="number" min="0" max="1000" value="${Math.max(0, selected.alertDamage || 0)}" data-shape-field="alertDamage">` : ''}</div>` : '';
-    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span><button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button></div>${tokenSizeControl}${shapeControls}`;
-    details.querySelector('.delete-selected').addEventListener('click', deleteSelected);
+    details.innerHTML = `<div class="selected-object"><span class="selected-swatch" style="background:${escapeAttribute(selected.color || TILE_STYLES[selected.kind]?.fill || '#7a8279')}"></span><span>${escapeHTML(label)}</span>${isRoomAdmin() ? '<button class="delete-selected" type="button" aria-label="Excluir seleção" title="Excluir">×</button>' : ''}</div>${tokenSizeControl}${shapeControls}`;
+    details.querySelector('.delete-selected')?.addEventListener('click', deleteSelected);
     for (const [field, input] of [['widthTiles', details.querySelector('#selectedTokenWidth')], ['heightTiles', details.querySelector('#selectedTokenHeight')]]) {
       input?.addEventListener('input', event => {
         selected[field] = tokenTileCount(event.target.value, selected.radius);
@@ -2653,6 +3043,7 @@
   function escapeAttribute(value) { return String(value).replace(/[&"<>]/g, char => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[char])); }
 
   function deleteSelected() {
+    if (!isRoomAdmin()) return;
     for (const collection of [state.tokens, state.tiles, state.shapes]) {
       for (let index = collection.length - 1; index >= 0; index--) {
         if (selectedIds.has(collection[index].id)) collection.splice(index, 1);
@@ -2666,14 +3057,7 @@
   function moveSelectedToken(dx, dy) {
     const token = state.tokens.find(item => item.id === selectedId);
     if (!token) return false;
-    const destination = { x: token.x + dx * GRID, y: token.y + dy * GRID };
-    if (!pointInsideMap(destination) || constructionBlocksRoute(token, destination)) { showToast('Uma construção bloqueia essa rota.'); return true; }
-    const from = objectGeometry(visualObject(token));
-    token.x = destination.x;
-    token.y = destination.y;
-    animateObjectFrom(token, from);
-    broadcastState();
-    return true;
+    return planTokenStep(dx, dy);
   }
 
   function showToast(message) {
@@ -2696,7 +3080,7 @@
     const codeInput = document.querySelector('#roomCode');
     roomId = normalizeRoom(codeInput.value) || Math.random().toString(36).slice(2, 8);
     codeInput.value = roomId;
-    disconnectPeer(); hostMode = true;
+    disconnectPeer(); hostMode = true; roomRole = 'admin'; roomMembers.clear(); updatePlayers();
     setConnectionStatus('connecting', 'Criando sala…');
     peer = new Peer(`stone-plate-${roomId}`, { debug: 1 });
     peer.on('open', () => {
@@ -2721,10 +3105,11 @@
     if (!window.Peer) { showToast('Não foi possível carregar a conexão multiplayer. Verifique sua internet.'); return; }
     const code = normalizeRoom(document.querySelector('#roomCode').value);
     if (!code) { showToast('Digite o código da sala.'); return; }
-    roomId = code; hostMode = false; disconnectPeer();
+    roomId = code; disconnectPeer(); hostMode = false; roomRole = 'player'; localMemberTokenId = null; roomMembers.clear(); updatePlayers();
     setConnectionStatus('connecting', 'Conectando…');
     peer = new Peer(undefined, { debug: 1 });
     peer.on('open', () => {
+      document.querySelector('#localPlayerName').textContent = 'Você';
       const connection = peer.connect(`stone-plate-${roomId}`, { reliable: true });
       connections.set('host', connection);
       connection.on('open', () => {
@@ -2747,22 +3132,40 @@
   function registerConnection(connection) {
     const id = connection.peer;
     connections.set(id, connection);
+    roomMembers.set(id, { role: 'player', tokenId: null });
     wireConnection(connection, id);
     updatePlayers();
-    connection.on('open', () => connection.send({ type: 'state', state }));
+    connection.on('open', () => {
+      connection.send({ type: 'state', state });
+      connection.send({ type: 'room-session', role: 'player', tokenId: null });
+      broadcastRoomMembers();
+    });
   }
 
   function wireConnection(connection, id) {
     connection.on('data', message => {
       if (!message) return;
+      if (message.type === 'room-session' && id === 'host') {
+        roomRole = message.role === 'admin' ? 'admin' : 'player';
+        localMemberTokenId = message.tokenId || null;
+        updatePlayers();
+        if (roomRole === 'player') setWorkspace('map');
+        updateInspectorSelection();
+        return;
+      }
+      if (message.type === 'room-members' && id === 'host' && Array.isArray(message.members)) { renderRoomMembers(message.members); return; }
+      if (message.type === 'member-update' && hostMode) { applyRoomMemberUpdate(message, id); return; }
+      if (message.type === 'move-token' && hostMode) { receiveMoveRequest(message, id); return; }
       if (message.type === 'dice-roll') { receiveDiceRoll(message.roll, 'peer'); return; }
       if (message.type === 'projectile' && message.projectile) {
+        if (hostMode && roomMembers.get(id)?.role !== 'admin') return;
         const projectile = message.projectile;
         const accepted = launchProjectile(projectile.start, projectile.end, projectile, projectile.id, false);
         if (accepted && hostMode) broadcast(message);
         return;
       }
       if (message.type === 'projectile-turn' && message.id) {
+        if (hostMode && roomMembers.get(id)?.role !== 'admin') return;
         const accepted = advanceProjectiles(message.id, false);
         if (accepted && hostMode) broadcast(message);
         return;
@@ -2770,31 +3173,57 @@
       if (message.type !== 'state' || !message.state) return;
       if (!Array.isArray(message.state.tokens) || !Array.isArray(message.state.tiles) || !Array.isArray(message.state.shapes)) return;
       if (!hostMode && id === 'host') {
-        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); return;
+        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); updatePlayers(); return;
       }
       if (hostMode) {
-        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); broadcast({ type: 'state', state });
+        if (roomMembers.get(id)?.role !== 'admin') return;
+        state = alignStateToGrid(message.state); gridVisible = state.gridVisible !== false; syncHealthToTokens(); saveState(); render(); notifyStateSubscribers(); updatePlayers(); broadcast({ type: 'state', state });
       }
     });
-    connection.on('close', () => { connections.delete(id); updatePlayers(); });
-    connection.on('error', () => { connections.delete(id); updatePlayers(); });
+    connection.on('close', () => { connections.delete(id); roomMembers.delete(id); updatePlayers(); broadcastRoomMembers(); });
+    connection.on('error', () => { connections.delete(id); roomMembers.delete(id); updatePlayers(); broadcastRoomMembers(); });
   }
 
   function updatePlayers() {
     const remote = document.querySelector('#remotePlayers');
+    const admins = document.querySelector('#roomAdminsList');
+    const localRow = document.querySelector('#localPlayerRow');
     remote.replaceChildren();
-    let index = 0;
-    for (const connection of connections.values()) {
-      if (connection.peer === 'host') continue;
+    admins.replaceChildren();
+    const manageable = isRoomAdmin();
+    document.body.classList.toggle('player-room', Boolean(peer && !hostMode && roomRole === 'player'));
+    localRow.querySelector('.player-role').textContent = roomRole === 'admin' ? 'ADMIN' : 'JOGADOR';
+    localRow.querySelector('.avatar').textContent = roomRole === 'admin' ? 'A' : 'J';
+    (roomRole === 'admin' ? admins : remote).append(localRow);
+    let playerIndex = 0;
+    let adminIndex = 0;
+    for (const [memberId, member] of roomMembers) {
+      if (peer && !hostMode && memberId === peer.id) continue;
+      const tokenOptions = state.tokens.map(token => `<option value="${escapeAttribute(token.id)}" ${String(member.tokenId || '') === String(token.id) ? 'selected' : ''}>${escapeHTML(token.name || 'Token')}</option>`).join('');
+      const memberIndex = member.role === 'admin' ? adminIndex++ : playerIndex++;
       const row = document.createElement('div');
       row.className = 'player-row';
-      row.innerHTML = `<span class="avatar remote">${String.fromCharCode(65 + (index % 26))}</span><span class="player-name">Jogador ${index + 1}</span><span class="player-role">JOGADOR</span><span class="presence-dot"></span>`;
-      remote.append(row); index++;
+      const avatar = document.createElement('span'); avatar.className = 'avatar remote'; avatar.textContent = String.fromCharCode(65 + (memberIndex % 26));
+      const name = document.createElement('span'); name.className = 'player-name'; name.textContent = `${member.role === 'admin' ? 'Admin' : 'Jogador'} ${memberIndex + 1}`; name.title = memberId;
+      const role = document.createElement('span'); role.className = 'player-role'; role.textContent = member.role === 'admin' ? 'ADMIN' : 'JOGADOR';
+      const presence = document.createElement('span'); presence.className = 'presence-dot';
+      row.append(avatar, name);
+      if (manageable) {
+        const roleSelect = document.createElement('select');
+        roleSelect.className = 'room-member-select'; roleSelect.dataset.memberRole = memberId; roleSelect.setAttribute('aria-label', `Cargo de participante ${memberIndex + 1}`);
+        roleSelect.innerHTML = `<option value="player" ${member.role !== 'admin' ? 'selected' : ''}>Jogador</option><option value="admin" ${member.role === 'admin' ? 'selected' : ''}>Admin</option>`;
+        const tokenSelect = document.createElement('select');
+        tokenSelect.className = 'room-member-select room-token-select'; tokenSelect.dataset.memberToken = memberId; tokenSelect.setAttribute('aria-label', `Token de participante ${memberIndex + 1}`);
+        tokenSelect.innerHTML = `<option value="">Sem token</option>${tokenOptions}`;
+        row.append(roleSelect, tokenSelect);
+      } else row.append(role, presence);
+      (member.role === 'admin' ? admins : remote).append(row);
     }
-    document.querySelector('#playerCount').textContent = String(index + 1);
+    document.querySelector('#playerCount').textContent = String(playerIndex + adminIndex + 1);
   }
 
   function setWorkspace(view) {
+    if (!isRoomAdmin() && view !== 'map') view = 'map';
     const showCharacters = view === 'characters';
     const showAdmin = view === 'admin';
     document.body.classList.toggle('settings-workspace-open', showCharacters);
@@ -2822,8 +3251,9 @@
   function disconnectPeer(resetStatus = true) {
     for (const connection of connections.values()) connection.close();
     connections.clear();
+    roomMembers.clear();
     if (peer) { peer.destroy(); peer = null; }
-    if (resetStatus) { hostMode = false; setConnectionStatus('', 'Local'); updatePlayers(); }
+    if (resetStatus) { hostMode = false; roomRole = 'admin'; localMemberTokenId = null; setConnectionStatus('', 'Local'); updatePlayers(); }
   }
 
   function exportMap() {
@@ -2850,11 +3280,26 @@
   document.querySelector('#adminViewButton').addEventListener('click', () => setWorkspace('admin'));
   window.StonePlateCharacters?.mount(window.StonePlate);
   document.querySelectorAll('.tool-button[data-tool]').forEach(button => button.addEventListener('click', () => setTool(button.dataset.tool)));
-  document.querySelector('#tilePalette').addEventListener('click', event => {
-    const button = event.target.closest('[data-tile]');
-    if (!button) return;
-    tileType = button.dataset.tile;
-    document.querySelectorAll('.tile-swatch').forEach(swatch => swatch.classList.toggle('active', swatch === button));
+  document.querySelector('#layersToggle').addEventListener('click', event => {
+    const panel = document.querySelector('#layersPopover');
+    panel.hidden = !panel.hidden;
+    event.currentTarget.setAttribute('aria-expanded', String(!panel.hidden));
+    event.currentTarget.classList.toggle('active', !panel.hidden);
+  });
+  document.querySelector('#addLayerButton').addEventListener('click', addLayer);
+  document.querySelector('#layerList').addEventListener('click', event => {
+    const button = event.target.closest('[data-layer-action]');
+    if (!button || button.disabled) return;
+    const { layerAction, layerId } = button.dataset;
+    if (layerAction === 'select' && isRoomAdmin()) { state.activeLayerId = layerId; broadcastState(); }
+    else if (layerAction === 'up') moveLayer(layerId, 1);
+    else if (layerAction === 'down') moveLayer(layerId, -1);
+    else if (layerAction === 'delete') removeLayer(layerId);
+  });
+  document.querySelector('#elevationLevel').addEventListener('input', event => {
+    elevationLevel = Math.round(Math.max(0, Math.min(MAX_ELEVATION_TILES, Number(event.target.value) || 0)) * 4) / 4;
+    const unit = elevationLevel === 1 ? 'tile' : 'tiles';
+    document.querySelector('#elevationLevelValue').textContent = elevationLevel === 0 ? 'Apagar' : `${elevationLevel.toLocaleString('pt-BR')} ${unit}`;
   });
   document.querySelector('#drawColor').addEventListener('input', event => syncRgbChannels(event.target.value));
   ['red', 'green', 'blue'].forEach(channel => document.querySelector(`#drawColor${channel}`).addEventListener('input', updateDrawColorFromRgb));
@@ -2932,6 +3377,31 @@
   });
   document.querySelector('#createRoomButton').addEventListener('click', createRoom);
   document.querySelector('#joinRoomButton').addEventListener('click', joinRoom);
+  document.querySelector('#movementModeFree').addEventListener('click', () => { movementMode = 'free'; updateInspectorSelection(); });
+  document.querySelector('#movementModeAngles').addEventListener('click', () => { movementMode = 'angles'; updateInspectorSelection(); });
+  document.querySelector('#movementAngleControls').addEventListener('click', event => {
+    const button = event.target.closest('[data-move-angle]');
+    if (!button) return;
+    const [dx, dy] = button.dataset.moveAngle.split(',').map(Number);
+    const distance = Math.max(1, Math.min(99, Math.floor(Number(document.querySelector('#movementDistance').value) || 1)));
+    document.querySelector('#movementDistance').value = String(distance);
+    planTokenStep(dx, dy, distance);
+  });
+  document.querySelector('#confirmMovement').addEventListener('click', confirmPlannedMove);
+  document.querySelector('#cancelMovement').addEventListener('click', clearPlannedMove);
+  for (const list of [document.querySelector('#roomAdminsList'), document.querySelector('#remotePlayers')]) {
+    list.addEventListener('change', event => {
+      const select = event.target.closest('[data-member-role], [data-member-token]');
+      if (!select) return;
+      const memberId = select.dataset.memberRole || select.dataset.memberToken;
+      const member = roomMembers.get(memberId);
+      if (!member) return;
+      const row = select.closest('.player-row');
+      const role = row.querySelector('[data-member-role]')?.value || member.role;
+      const tokenId = row.querySelector('[data-member-token]')?.value || null;
+      applyRoomMemberUpdate({ memberId, role, tokenId }, hostMode ? 'local-admin' : peer?.id);
+    });
+  }
   document.querySelector('#shareButton').addEventListener('click', async () => {
     if (!roomId) { showToast('Crie ou entre em uma sala primeiro.'); return; }
     try { await navigator.clipboard.writeText(roomId); showToast('Código da sala copiado.'); }
@@ -2939,8 +3409,8 @@
   });
   document.querySelector('#gridToggle').addEventListener('click', event => { gridVisible = !gridVisible; state.gridVisible = gridVisible; event.currentTarget.classList.toggle('active', !gridVisible); broadcastState(); });
   document.querySelector('#clearButton').addEventListener('click', () => {
-    if (!state.tokens.length && !state.tiles.length && !state.shapes.length) return;
-    if (window.confirm('Remover todos os tokens, tiles e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity, health: state.health }; gridVisible = true; setSelection([]); broadcastState(); }
+    if (!state.tokens.length && !state.tiles.length && !state.shapes.length && !state.elevation.length) return;
+    if (window.confirm('Remover tokens, tiles, elevações e marcações deste mapa?')) { state = { ...defaultState(), map: state.map, opacity: state.opacity, health: state.health }; gridVisible = true; setSelection([]); broadcastState(); }
   });
   document.querySelector('#exportButton').addEventListener('click', exportMap);
   document.querySelector('#importButton').addEventListener('click', () => document.querySelector('#importFile').click());
@@ -2952,6 +3422,7 @@
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
+  canvas.addEventListener('dblclick', onDoubleClick);
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   canvas.addEventListener('wheel', event => {
     event.preventDefault();
@@ -2970,20 +3441,21 @@
   window.addEventListener('resize', resizeCanvas);
   window.addEventListener('keydown', event => {
     if (event.code === 'Space' && !event.repeat && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); canvas.dataset.space = 'true'; }
-    if (event.key === 'Escape') { currentShape = null; pendingLineStart = null; linePreview = null; pendingProjectileStart = null; projectilePreview = null; pendingTokenMove = null; movementRoute = null; dragReadout = null; selectionBox = null; setSelection([]); render(); }
+    if (event.key === 'Escape') { currentShape = null; pendingLineStart = null; linePreview = null; pendingProjectileStart = null; projectilePreview = null; pendingTokenMove = null; plannedMove = null; movementRoute = null; dragReadout = null; selectionBox = null; setSelection([]); render(); }
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (!['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) && selectedId) deleteSelected();
     }
-    if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (event.key === 'Enter' && plannedMove) { event.preventDefault(); confirmPlannedMove(); return; }
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
     if (event.code === 'KeyM' && !event.repeat) {
       event.preventDefault();
       magnifierMode = (magnifierMode + 1) % 3;
       updateMagnifier();
       return;
     }
-    const movement = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[event.key];
-    if (movement && moveSelectedToken(movement[0], movement[1])) { event.preventDefault(); return; }
-    const shortcuts = { v: 'select', t: 'token', b: 'tile', l: 'line', r: 'straight-line', p: 'locate', j: 'projectile', c: 'circle', q: 'square' };
+    const movement = { arrowup: [0, -1], arrowdown: [0, 1], arrowleft: [-1, 0], arrowright: [1, 0], w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0], q: [-1, -1], e: [1, -1], z: [-1, 1], c: [1, 1] }[event.key.toLowerCase()];
+    if (movement && movementMode === 'free' && moveSelectedToken(movement[0], movement[1])) { event.preventDefault(); return; }
+    const shortcuts = { v: 'select', t: 'token', u: 'elevation', l: 'line', r: 'straight-line', p: 'locate', j: 'projectile', c: 'circle', q: 'square' };
     if (shortcuts[event.key.toLowerCase()]) setTool(shortcuts[event.key.toLowerCase()]);
   });
   window.addEventListener('keyup', event => { if (event.code === 'Space') delete canvas.dataset.space; });

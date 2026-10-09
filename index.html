@@ -50,14 +50,14 @@
         <button class="tool-button" data-tool="token" type="button" title="Adicionar token (T)" aria-label="Adicionar token">
           <span class="tool-glyph token-glyph" aria-hidden="true"><i></i></span><span>Token</span><kbd>T</kbd>
         </button>
+        <button class="tool-button" data-tool="elevation" type="button" title="Pintar elevação (U)" aria-label="Pintar elevação">
+          <span class="tool-glyph" aria-hidden="true">▱</span><span>Elevação</span><kbd>U</kbd>
+        </button>
         <button class="tool-button" data-tool="locate" type="button" title="Localizar token (P)" aria-label="Localizar token">
           <span class="tool-glyph" aria-hidden="true">⌖</span><span>Localizar</span><kbd>P</kbd>
         </button>
         <button class="tool-button" data-tool="projectile" type="button" title="Disparar projétil (J)" aria-label="Disparar projétil">
           <span class="tool-glyph" aria-hidden="true">➤</span><span>Projétil</span><kbd>J</kbd>
-        </button>
-        <button class="tool-button" data-tool="tile" type="button" title="Pintar tile (B)" aria-label="Pintar tile">
-          <span class="tool-glyph tile-glyph" aria-hidden="true">▦</span><span>Tiles</span><kbd>B</kbd>
         </button>
         <div class="tool-separator"></div>
         <button class="tool-button" data-tool="line" type="button" title="Traço livre (L)" aria-label="Traço livre">
@@ -93,6 +93,21 @@
             <span class="board-title" id="boardTitle">Encontro sem título</span>
           </div>
           <div class="board-actions">
+            <div class="layer-manager">
+              <button class="icon-button layer-toggle" id="layersToggle" type="button" aria-label="Abrir camadas" aria-expanded="false" title="Camadas">
+                <span aria-hidden="true">▤</span><span id="activeLayerName">Camada 1</span>
+              </button>
+              <button class="icon-button layer-add" id="addLayerButton" type="button" title="Adicionar camada" aria-label="Adicionar camada">＋</button>
+              <div class="layers-popover" id="layersPopover" hidden>
+                <div class="layers-heading"><span>CAMADAS</span></div>
+                <div class="layer-list" id="layerList"></div>
+              </div>
+            </div>
+            <div id="elevationOptions" class="elevation-controls" hidden>
+              <label for="elevationLevel">ALTURA</label>
+              <input id="elevationLevel" type="range" min="0" max="2" step="0.25" value="0.25">
+              <output id="elevationLevelValue">0,25 tile</output>
+            </div>
             <button class="icon-button" id="gridToggle" type="button" aria-label="Alternar grade" title="Alternar grade"><span class="grid-icon" aria-hidden="true">▦</span></button>
             <button class="icon-button" id="shareButton" type="button" aria-label="Copiar código da sala" title="Copiar código da sala"><span aria-hidden="true">⤴</span></button>
           </div>
@@ -220,23 +235,39 @@
             </div>
             <p class="field-note">Clique para posicionar. Selecione e use as setas para mover.</p>
           </div>
-          <div id="tileOptions" class="options-content" hidden>
-            <span class="field-label">TIPO DE TILE</span>
-            <div class="tile-palette" id="tilePalette">
-              <button class="tile-swatch active" data-tile="stone" type="button" aria-label="Pedra" title="Pedra"><i></i></button>
-              <button class="tile-swatch water" data-tile="water" type="button" aria-label="Água" title="Água"><i></i></button>
-              <button class="tile-swatch grass" data-tile="grass" type="button" aria-label="Grama" title="Grama"><i></i></button>
-              <button class="tile-swatch lava" data-tile="lava" type="button" aria-label="Lava" title="Lava"><i></i></button>
-              <button class="tile-swatch wall" data-tile="wall" type="button" aria-label="Parede" title="Parede"><i></i></button>
-              <button class="tile-swatch erase" data-tile="erase" type="button" aria-label="Apagar tile" title="Apagar"></button>
-            </div>
-            <p class="field-note">Clique ou arraste para pintar.</p>
-          </div>
         </section>
 
         <section class="inspector-section selected-section" id="selectedSection" hidden>
           <div class="section-heading"><span>SELECIONADO</span><span class="section-rule"></span></div>
           <div id="selectedDetails"></div>
+          <div id="movementControls" class="movement-planner" hidden>
+            <div class="section-heading movement-heading"><span>MOVIMENTO</span><span class="section-rule"></span></div>
+            <div class="movement-mode" role="group" aria-label="Modo de movimento">
+              <button id="movementModeFree" type="button" aria-pressed="true">Teclas livres</button>
+              <button id="movementModeAngles" type="button" aria-pressed="false">8 ângulos</button>
+            </div>
+            <div id="movementAngleControls" class="movement-angle-controls" hidden>
+              <div class="angle-pad" role="group" aria-label="Direção do movimento">
+                <button type="button" data-move-angle="-1,-1" aria-label="Noroeste" title="Noroeste">↖</button>
+                <button type="button" data-move-angle="0,-1" aria-label="Norte" title="Norte">↑</button>
+                <button type="button" data-move-angle="1,-1" aria-label="Nordeste" title="Nordeste">↗</button>
+                <button type="button" data-move-angle="-1,0" aria-label="Oeste" title="Oeste">←</button>
+                <span aria-hidden="true"></span>
+                <button type="button" data-move-angle="1,0" aria-label="Leste" title="Leste">→</button>
+                <button type="button" data-move-angle="-1,1" aria-label="Sudoeste" title="Sudoeste">↙</button>
+                <button type="button" data-move-angle="0,1" aria-label="Sul" title="Sul">↓</button>
+                <button type="button" data-move-angle="1,1" aria-label="Sudeste" title="Sudeste">↘</button>
+              </div>
+              <label class="field-label movement-distance" for="movementDistance">DISTÂNCIA (TILES)
+                <input id="movementDistance" class="text-input map-number" type="number" min="1" max="99" step="1" value="1">
+              </label>
+            </div>
+            <p id="movementStatus" class="field-note">Use as setas ou WASD para marcar o trajeto.</p>
+            <div class="movement-actions">
+              <button id="cancelMovement" class="button button-secondary compact-button" type="button">Cancelar</button>
+              <button id="confirmMovement" class="button button-primary compact-button" type="button" disabled>Confirmar</button>
+            </div>
+          </div>
         </section>
 
         <section class="inspector-section map-section" aria-label="Configurações do mapa">
@@ -280,8 +311,9 @@
 
         <section class="inspector-section players-section">
           <div class="section-heading"><span>NA MESA</span><span class="player-count" id="playerCount">1</span></div>
-          <div class="player-row"><span class="avatar avatar-you">V</span><span class="player-name">Você</span><span class="player-role">MESTRE</span><span class="presence-dot"></span></div>
-          <div id="remotePlayers"></div>
+          <div class="room-role-group"><span class="room-role-heading">ADMINS</span><div id="roomAdminsList"></div></div>
+          <div class="room-role-group"><span class="room-role-heading">JOGADORES</span><div id="remotePlayers"></div></div>
+          <div id="localPlayerRow" class="player-row"><span class="avatar avatar-you">A</span><span class="player-name" id="localPlayerName">Você</span><span class="player-role">ADMIN</span><span class="presence-dot"></span></div>
           <div class="invite-note" id="inviteNote">Crie uma sala para convidar outros jogadores.</div>
         </section>
 
